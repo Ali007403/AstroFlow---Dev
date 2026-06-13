@@ -148,11 +148,11 @@ def build_stacked_spectrum(
 
     arr = np.array(interp_fluxes)
 
-    stacked = (
-        np.nanmedian(arr, axis=0)
-        if method == "median"
-        else np.nanmean(arr, axis=0)
-    )
+    stacked = np.nanmedian(arr, axis=0) if method == "median" else np.nanmean(arr, axis=0)
+
+# HARD CLEAN after stacking (critical fix)
+stacked = np.asarray(stacked, dtype=float)
+stacked[~np.isfinite(stacked)] = np.nan
 
     return ref_wl, stacked
 
@@ -714,10 +714,13 @@ with tabs[4]:
         y_label = spec_results[0].get("y_label", "Flux")
         ref_wl, stacked = build_stacked_spectrum(spec_results, method=stack_method)
 
-        if smoothing_enabled and not raw_only and len(stacked) >= smoothing_window:
-            stacked_smooth = smooth_flux(stacked, smoothing_window, polyorder)
-        else:
-            stacked_smooth = stacked
+        clean_stack = np.asarray(stacked, dtype=float)
+clean_stack[~np.isfinite(clean_stack)] = np.nan
+
+if smoothing_enabled and not raw_only and len(clean_stack) >= smoothing_window:
+    stacked_smooth = smooth_flux(clean_stack, smoothing_window, polyorder)
+else:
+    stacked_smooth = clean_stack
 
         if not raw_only:
             if np.nanmax(stacked_smooth) != np.nanmin(stacked_smooth):
