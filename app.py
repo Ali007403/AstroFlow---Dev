@@ -24,6 +24,21 @@ import matplotlib.pyplot as plt
 st.set_page_config(page_title="AstroFlow · FITSFlow", layout="wide", initial_sidebar_state="expanded")
 
 # ---------------------------
+import matplotlib as mpl
+mpl.rcParams.update({
+  "font.family": "serif",
+  "font.size": 11,
+  "axes.linewidth": 0.8,
+  "xtick.direction": "in",
+  "ytick.direction": "in",
+  "xtick.minor.visible": True,
+  "ytick.minor.visible": True,
+  "figure.dpi": 150,
+  "savefig.dpi": 300,
+  "savefig.bbox": "tight",
+  "axes.spines.top": False,
+  "axes.spines.right": False,
+})
 # Helper: stable key generator
 # ---------------------------
 def make_key(*parts):
