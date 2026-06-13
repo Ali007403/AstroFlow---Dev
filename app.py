@@ -159,9 +159,35 @@ def build_stacked_spectrum(
 #=============================
 
 def smooth_flux(flux, window, polyorder):
-    if len(flux) >= window and window % 2 == 1:
+    flux = np.asarray(flux, dtype=float)
+
+    # remove inf
+    flux[~np.isfinite(flux)] = np.nan
+
+    finite = np.isfinite(flux)
+
+    if finite.sum() < max(window, polyorder + 2):
+        return flux
+
+    # interpolate missing values
+    if not np.all(finite):
+        x = np.arange(len(flux))
+        flux = np.interp(x, x[finite], flux[finite])
+
+    # ensure valid window
+    if window >= len(flux):
+        window = len(flux) - 1 if len(flux) % 2 == 0 else len(flux)
+
+    if window % 2 == 0:
+        window += 1
+
+    if window < polyorder + 2:
+        return flux
+
+    try:
         return savgol_filter(flux, window, polyorder)
-    return flux
+    except Exception:
+        return flux
 
 def calc_snr_on_band(ref_wl, ref_flux, band_range: Tuple[float, float]):
     start, end = band_range
