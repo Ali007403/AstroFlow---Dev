@@ -184,8 +184,8 @@ st.sidebar.caption("Prototype · AstroFlow / FutureMind")
 # ---------------------------
 # Main UI area
 # ---------------------------
-st.title("🔭 AstroFlow · FITSFlow Processor")
-st.markdown("Upload FITS or CSV files (JWST/HST/TESS/generic). Tabs: Raw | Smoothed | Molecule Detection | Stacked | Table")
+st.title("🔭 AstroFlow · FITS Processor")
+st.markdown("Upload FITS or CSV files (JWST/HST/TESS/generic)")
 
 uploaded = st.file_uploader(
     "Upload one or more FITS/CSV files",
@@ -194,7 +194,7 @@ uploaded = st.file_uploader(
 )
 
 if not uploaded:
-    st.info("Upload FITS or CSV spectral files to start. Example FITS: K2-18b, GJ-1214b.")
+    st.info("Upload FITS or CSV spectral files to start")
     st.stop()
 
 # --- Save uploaded files and process each (FITS or CSV) ---
