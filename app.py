@@ -8,7 +8,7 @@
 # app.py (updated with dynamic axis labels)
 from FitsFlow.csv_handler import ingest_csv_file
 from FitsFlow.detectors import detect_anomalies, annotate_plotly
-from FitsFlow.fields import detect_data_type, map_columns
+from FitsFlow.fields import map_columns
 from FitsFlow.reporters import generate_pdf_report
 
 import streamlit as st
@@ -123,12 +123,47 @@ def interp_to_reference(wl, fl, ref_wl):
     except Exception:
         return np.full_like(ref_wl, np.nan)
 
+#==============================
+def build_stacked_spectrum(
+    spectra,
+    method="mean"
+):
+    min_wl = min(np.nanmin(r["wl"]) for r in spectra)
+    max_wl = max(np.nanmax(r["wl"]) for r in spectra)
+
+    ref_wl = np.linspace(
+        min_wl,
+        max_wl,
+        2000
+    )
+
+    interp_fluxes = [
+        interp_to_reference(
+            r["wl"],
+            r["fl"],
+            ref_wl
+        )
+        for r in spectra
+    ]
+
+    arr = np.array(interp_fluxes)
+
+    stacked = (
+        np.nanmedian(arr, axis=0)
+        if method == "median"
+        else np.nanmean(arr, axis=0)
+    )
+
+    return ref_wl, stacked
+
+#=============================
+
 def smooth_flux(flux, window, polyorder):
     if len(flux) >= window and window % 2 == 1:
         return savgol_filter(flux, window, polyorder)
     return flux
 
-def calc_snr_on_band(ref_wl, ref_flux, band_range: Tuple[float,float]):
+def calc_snr_on_band(ref_wl, ref_flux, band_range: Tuple[float, float]):
     start, end = band_range
     mask = (ref_wl >= start) & (ref_wl <= end)
     if not np.any(mask):
@@ -155,7 +190,7 @@ DEFAULT_BANDS = {
 # ==========================================================
 # MAST ARCHIVE INTEGRATION
 # ==========================================================
-
+@st.cache_data(ttl=3600)
 def mast_search_target(target_name, mission=None, radius="0.05 deg"):
     """
     Search MAST archive for a target.
@@ -176,7 +211,6 @@ def mast_search_target(target_name, mission=None, radius="0.05 deg"):
     except Exception as e:
         st.error(f"MAST search failed: {e}")
         return None
-
 
 def mast_download_products(observation_row):
     """
@@ -210,7 +244,7 @@ def mast_download_products(observation_row):
         st.error(f"MAST download failed: {e}")
         return None
 
-
+@st.cache_data(ttl=3600)
 def mast_import_fits(file_path):
     """
     Import downloaded FITS into AstroFlow format.
@@ -258,47 +292,38 @@ def mast_import_fits(file_path):
 st.sidebar.header("AstroFlow Controls")
 st.sidebar.markdown("Upload FITS/CSV files and toggle analysis options.")
 
-smoothing_enabled = st.sidebar.checkbox("Enable smoothing", value=True)
-smoothing_window = st.sidebar.slider("Smoothing window (odd)", 5, 501, 51, step=2)
-polyorder = st.sidebar.slider("SavGol polyorder", 1, 5, 3)
+with st.sidebar.expander("Spectrum Processing", expanded=True):
+    smoothing_enabled = st.checkbox("Enable smoothing", value=True)
+    smoothing_window = st.slider("Smoothing window (odd)", 5, 501, 51, step=2)
+    polyorder = st.slider("SavGol polyorder", 1, 5, 3)
 
-show_bands = st.sidebar.checkbox("Show molecular bands (overlay)", value=True)
-selected_bands = st.sidebar.multiselect(
-    "Select molecular bands to display",
-    options=list(DEFAULT_BANDS.keys()),
-    default=list(DEFAULT_BANDS.keys())
-)
+    show_bands = st.checkbox("Show molecular bands (overlay)", value=True)
+    selected_bands = st.multiselect(
+        "Select molecular bands to display",
+        options=list(DEFAULT_BANDS.keys()),
+        default=list(DEFAULT_BANDS.keys())
+    )
 
-# ==========================================================
-# MAST SEARCH PANEL
-# ==========================================================
+with st.sidebar.expander("MAST Archive", expanded=True):
+    mast_target = st.text_input(
+        "Target Name",
+        value="K2-18"
+    )
 
-st.sidebar.markdown("---")
-st.sidebar.header("🔭 MAST Archive")
+    mast_mission = st.selectbox(
+        "Mission",
+        [
+            "All",
+            "JWST",
+            "HST",
+            "TESS",
+            "Kepler"
+        ]
+    )
 
-mast_target = st.sidebar.text_input(
-    "Target Name",
-    value="K2-18"
-)
-
-mast_mission = st.sidebar.selectbox(
-    "Mission",
-    [
-        "All",
-        "JWST",
-        "HST",
-        "TESS",
-        "Kepler"
-    ]
-)
-
-mast_search_btn = st.sidebar.button(
-    "Search MAST"
-)
-
-#=====================
-# End Mast Seach Panel
-#=====================
+    mast_search_btn = st.button(
+        "Search MAST"
+    )
 
 # ==========================================================
 # RUN MAST SEARCH
@@ -322,16 +347,16 @@ if mast_search_btn:
                 "No observations found."
             )
 
-show_snr = st.sidebar.checkbox("Show SNR", value=False)
-show_errorbars = st.sidebar.checkbox("Show error bars (if available)", value=False)
-raw_only = st.sidebar.checkbox("Show raw data only (no smoothing/stacking overlays)", value=False)
+with st.sidebar.expander("Display / Export", expanded=True):
+    show_snr = st.checkbox("Show SNR", value=False)
+    show_errorbars = st.checkbox("Show error bars (if available)", value=False)
+    raw_only = st.checkbox("Show raw data only (no smoothing/stacking overlays)", value=False)
 
-stack_enabled = st.sidebar.checkbox("Enable stacking (multi-file)", value=True)
-stack_method = st.sidebar.selectbox("Stack method", ["mean", "median"], index=0)
+    stack_enabled = st.checkbox("Enable stacking (multi-file)", value=True)
+    stack_method = st.selectbox("Stack method", ["mean", "median"], index=0)
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("Display / export options")
-enable_downloads = st.sidebar.checkbox("Enable downloads", value=True)
+    enable_downloads = st.checkbox("Enable downloads", value=True)
+
 st.sidebar.markdown("---")
 st.sidebar.caption("Prototype · AstroFlow / FutureMind")
 
@@ -363,7 +388,7 @@ progress = st.progress(0) if uploaded else None
 
 if uploaded:
     for i, up in enumerate(uploaded, start=1):
-        progress.progress(int((i-1)/nfiles*100))
+        progress.progress(int((i - 1) / nfiles * 100))
         fname = up.name
         dst = os.path.join(tmpdir, fname)
         with open(dst, "wb") as f:
@@ -432,10 +457,29 @@ if uploaded:
             st.error(f"Failed to open {fname}: {e}")
 
     progress.progress(100)
-    time.sleep(0.2)
 
 mast_imported_results = st.session_state.get("mast_imported_results", [])
 results = uploaded_results + mast_imported_results
+
+#=============================================
+st.sidebar.markdown("---")
+with st.sidebar.expander("Session Summary", expanded=False):
+    num_spectra = sum(
+        1
+        for r in results
+        if r.get("wl") is not None
+    )
+
+    num_files_with_path = sum(
+        1
+        for r in results
+        if r.get("path")
+    )
+
+    st.metric("Spectra", num_spectra)
+    st.metric("Files", len(results))
+    st.metric("MAST Imports", len(mast_imported_results))
+#====================================================
 
 if len(results) == 0 and mast_results is None:
     st.error("No spectra could be extracted from uploaded files. You may upload pre-processed wavelength+flux CSVs.")
@@ -640,20 +684,16 @@ with tabs[4]:
     if len(spec_results) < 2 or not stack_enabled:
         st.info("Upload multiple spectra and enable stacking to see combined results.")
     else:
-        # pick labels from first spectrum (best-effort)
         x_label = spec_results[0].get("x_label", "Wavelength")
         y_label = spec_results[0].get("y_label", "Flux")
-        min_wl = min(np.nanmin(r['wl']) for r in spec_results)
-        max_wl = max(np.nanmax(r['wl']) for r in spec_results)
-        ref_wl = np.linspace(min_wl, max_wl, 2000)
-        interp_fluxes = [interp_to_reference(r['wl'], r['fl'], ref_wl) for r in spec_results]
-        arr = np.array(interp_fluxes)
-        stacked = np.nanmedian(arr, axis=0) if stack_method == "median" else np.nanmean(arr, axis=0)
+        ref_wl, stacked = build_stacked_spectrum(spec_results, method=stack_method)
+
         if smoothing_enabled and not raw_only and len(stacked) >= smoothing_window:
             stacked_smooth = smooth_flux(stacked, smoothing_window, polyorder)
         else:
             stacked_smooth = stacked
-        if True and not raw_only:
+
+        if not raw_only:
             if np.nanmax(stacked_smooth) != np.nanmin(stacked_smooth):
                 stacked_norm = (stacked - np.nanmin(stacked)) / (np.nanmax(stacked) - np.nanmin(stacked))
                 stacked_smooth = (stacked_smooth - np.nanmin(stacked_smooth)) / (np.nanmax(stacked_smooth) - np.nanmin(stacked_smooth)) if np.nanmax(stacked_smooth) != np.nanmin(stacked_smooth) else stacked_smooth
@@ -663,11 +703,25 @@ with tabs[4]:
             stacked_norm = stacked
 
         bands_for_plot = {}
-        if "H2O" in selected_bands: bands_for_plot["H2O"] = DEFAULT_BANDS["H2O"]
-        if "CH4" in selected_bands: bands_for_plot["CH4"] = DEFAULT_BANDS["CH4"]
-        if "CO2" in selected_bands: bands_for_plot["CO2"] = DEFAULT_BANDS["CO2"]
+        if "H2O" in selected_bands:
+            bands_for_plot["H2O"] = DEFAULT_BANDS["H2O"]
+        if "CH4" in selected_bands:
+            bands_for_plot["CH4"] = DEFAULT_BANDS["CH4"]
+        if "CO2" in selected_bands:
+            bands_for_plot["CO2"] = DEFAULT_BANDS["CO2"]
 
-        fig_st = plot_spectrum_interactive(ref_wl, np.nan_to_num(stacked_norm), fl_smooth=stacked_smooth, err=None, title="Stacked Spectrum", bands=bands_for_plot, show_bands_flag=show_bands and not raw_only, show_error=False, x_label=x_label, y_label=y_label)
+        fig_st = plot_spectrum_interactive(
+            ref_wl,
+            np.nan_to_num(stacked_norm),
+            fl_smooth=stacked_smooth,
+            err=None,
+            title="Stacked Spectrum",
+            bands=bands_for_plot,
+            show_bands_flag=show_bands and not raw_only,
+            show_error=False,
+            x_label=x_label,
+            y_label=y_label
+        )
         st.plotly_chart(fig_st, use_container_width=True, key=make_key('stacked', 'plot'))
         if show_snr and bands_for_plot:
             st.subheader("Stacked SNR (approx)")
@@ -709,12 +763,7 @@ with tabs[6]:
 
         spec_results = [r for r in results if r.get("wl") is not None and r.get("fl") is not None]
         if len(spec_results) >= 2 and stack_enabled:
-            min_wl = min(np.nanmin(r['wl']) for r in spec_results)
-            max_wl = max(np.nanmax(r['wl']) for r in spec_results)
-            ref_wl = np.linspace(min_wl, max_wl, 2000)
-            interp_fluxes = [interp_to_reference(r['wl'], r['fl'], ref_wl) for r in spec_results]
-            arr = np.array(interp_fluxes)
-            stacked = np.nanmedian(arr, axis=0) if stack_method == "median" else np.nanmean(arr, axis=0)
+            ref_wl, stacked = build_stacked_spectrum(spec_results, method=stack_method)
             if np.nanmax(stacked) != np.nanmin(stacked):
                 stacked = (stacked - np.nanmin(stacked)) / (np.nanmax(stacked) - np.nanmin(stacked))
             df_stack = pd.DataFrame({spec_results[0].get("x_label", "Wavelength"): ref_wl, "stacked": stacked})
@@ -730,11 +779,21 @@ st.caption("AstroFlow · FITSFlow MVP — upload data, toggle options, export re
 with tabs[7]:
     st.header("FITS Images")
     found_image = False
+    seen_files = set()
+
     for r in results:
-        if not r.get("path"):
+        file_path = r.get("path")
+
+        if not file_path:
             continue
+
+        if file_path in seen_files:
+            continue
+
+        seen_files.add(file_path)
+
         try:
-            with fits.open(r["path"], memmap=False) as hdul:
+            with fits.open(file_path, memmap=False) as hdul:
                 for idx, hdu in enumerate(hdul):
                     if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
                         found_image = True
@@ -748,7 +807,13 @@ with tabs[7]:
                             fig.savefig(buf, format="png")
                             buf.seek(0)
                             dl_key = make_key(r['file'], idx, 'image_download', time.time())
-                            st.download_button(label=f"Download Image (PNG) — {r['file']} HDU {idx}", data=buf, file_name=f"{r['file']}_hdu{idx}_image.png", mime="image/png", key=dl_key)
+                            st.download_button(
+                                label=f"Download Image (PNG) — {r['file']} HDU {idx}",
+                                data=buf,
+                                file_name=f"{r['file']}_hdu{idx}_image.png",
+                                mime="image/png",
+                                key=dl_key
+                            )
                         plt.close(fig)
         except Exception as e:
             st.warning(f"Could not open {r.get('file')} for images: {e}")
@@ -774,7 +839,7 @@ with tabs[8]:
             x_label = res.get("x_label", "Wavelength")
             y_label = res.get("y_label", "Flux")
             buf = io.BytesIO()
-            plt.figure(figsize=(6,4))
+            plt.figure(figsize=(6, 4))
             plt.plot(wl, fl, color='blue')
             plt.xlabel(x_label)
             plt.ylabel(y_label)
@@ -828,19 +893,18 @@ with tabs[8]:
             st.error("PDF report was not generated.")
 
 # ---------------------------
-# Anomalies tab
+# Anomaly Detection tab
 # ---------------------------
 with tabs[9]:
     st.header("Anomaly Detection")
     st.markdown("Lightweight detectors: z-score outliers, local dips, spikes. Tune thresholds in the sidebar.")
 
-    # Sidebar controls for anomaly detection
-    st.sidebar.markdown("Anomaly detection settings")
-    z_thresh = st.sidebar.slider("Outlier z-threshold", 3, 10, 4)
-    dip_window = st.sidebar.slider("Dip median window (px)", 11, 501, 101, step=2)
-    dip_depth = st.sidebar.number_input("Dip minimum depth fraction", min_value=0.0001, max_value=1.0, value=0.01, step=0.001)
-    spike_window = st.sidebar.slider("Spike window", 3, 101, 11, step=2)
-    spike_std = st.sidebar.slider("Spike std-factor", 2, 20, 6)
+    with st.sidebar.expander("Anomaly Detection Settings", expanded=False):
+        z_thresh = st.slider("Outlier z-threshold", 3, 10, 4)
+        dip_window = st.slider("Dip median window (px)", 11, 501, 101, step=2)
+        dip_depth = st.number_input("Dip minimum depth fraction", min_value=0.0001, max_value=1.0, value=0.01, step=0.001)
+        spike_window = st.slider("Spike window", 3, 101, 11, step=2)
+        spike_std = st.slider("Spike std-factor", 2, 20, 6)
 
     anomalies_all = []
 
@@ -853,8 +917,13 @@ with tabs[9]:
         x_label = res.get("x_label", "Wavelength")
         y_label = res.get("y_label", "Flux")
 
-        params = {"z_thresh": z_thresh, "dip_window": dip_window, "dip_depth": dip_depth,
-                  "spike_window": spike_window, "spike_std": spike_std}
+        params = {
+            "z_thresh": z_thresh,
+            "dip_window": dip_window,
+            "dip_depth": dip_depth,
+            "spike_window": spike_window,
+            "spike_std": spike_std
+        }
         anoms = detect_anomalies(wl, fl, params=params)
 
         # Add file info to each anomaly
@@ -867,8 +936,13 @@ with tabs[9]:
         st.subheader(f"{res['file']} (HDU {res.get('hdu_index')})")
 
         # Plot spectrum with anomalies
-        fig = plot_spectrum_interactive(wl, fl, title=f"{res['file']} (HDU {res.get('hdu_index')})",
-                                        x_label=x_label, y_label=y_label)
+        fig = plot_spectrum_interactive(
+            wl,
+            fl,
+            title=f"{res['file']} (HDU {res.get('hdu_index')})",
+            x_label=x_label,
+            y_label=y_label
+        )
         fig = annotate_plotly(fig, anoms)
         st.plotly_chart(fig, use_container_width=True, key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot'))
 
