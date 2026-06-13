@@ -703,6 +703,7 @@ with tabs[3]:
                 dl_key = make_key(res['file'], res['hdu_index'], 'download', 'mol_csv')
                 st.download_button(f"Download CSV (processed) - {res['file']}", df.to_csv(index=False).encode('utf-8'), file_name=f"{res['file']}_hdu{res['hdu_index']}_processed.csv", mime='text/csv', key=dl_key)
 
+
 # Stacked tab
 with tabs[4]:
     st.header("Stacked Spectrum")
@@ -715,12 +716,12 @@ with tabs[4]:
         ref_wl, stacked = build_stacked_spectrum(spec_results, method=stack_method)
 
         clean_stack = np.asarray(stacked, dtype=float)
-clean_stack[~np.isfinite(clean_stack)] = np.nan
+        clean_stack[~np.isfinite(clean_stack)] = np.nan
 
-if smoothing_enabled and not raw_only and len(clean_stack) >= smoothing_window:
-    stacked_smooth = smooth_flux(clean_stack, smoothing_window, polyorder)
-else:
-    stacked_smooth = clean_stack
+        if smoothing_enabled and not raw_only and len(clean_stack) >= smoothing_window:
+            stacked_smooth = smooth_flux(clean_stack, smoothing_window, polyorder)
+        else:
+            stacked_smooth = clean_stack
 
         if not raw_only:
             if np.nanmax(stacked_smooth) != np.nanmin(stacked_smooth):
