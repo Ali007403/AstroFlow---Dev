@@ -1,0 +1,7 @@
+Copyright (c) 2025 <Ali Nawaz>. All rights reserved.
+
+Permission to view this repository is granted for non-commercial evaluation and educational use only. 
+No part of this code may be copied, modified, distributed, published, or used for any commercial purpose 
+without express prior written permission from the copyright holder.
+
+For licensing inquiries, contact: <alinawaz9519@gmail.com>
