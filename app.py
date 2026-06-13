@@ -148,11 +148,11 @@ def build_stacked_spectrum(
 
     arr = np.array(interp_fluxes)
 
-    stacked = np.nanmedian(arr, axis=0) if method == "median" else np.nanmean(arr, axis=0)
+        stacked = np.nanmedian(arr, axis=0) if method == "median" else np.nanmean(arr, axis=0)
 
-# HARD CLEAN after stacking (critical fix)
-stacked = np.asarray(stacked, dtype=float)
-stacked[~np.isfinite(stacked)] = np.nan
+    # HARD CLEAN after stacking (critical fix)
+    stacked = np.asarray(stacked, dtype=float)
+    stacked[~np.isfinite(stacked)] = np.nan
 
     return ref_wl, stacked
 
