@@ -1062,12 +1062,16 @@ with tabs[8]:
         report_progress.progress(90, text="Compiling PDF…")
 
         # Build enriched metadata for reporters module
+        # Sanitize strings for PDF compatibility
+        safe_title = f"AstroFlow Analysis Report - {rpt_target}".replace('\u2014', '-').replace('\u2013', '-')
+        safe_notes = (rpt_notes or "").replace('\u2014', '-').replace('\u2013', '-').replace('\u2018', "'").replace('\u2019', "'")
+
         report_metadata = {
-            "title": f"AstroFlow Analysis Report — {rpt_target}",
+            "title": safe_title,
             "author": rpt_author,
             "target": rpt_target,
             "instrument": rpt_instrument,
-            "notes": rpt_notes,
+            "notes": safe_notes,
             "generated": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
             "n_spectra": len(spec_results_for_report),
             "files": list({r["file"] for r in spec_results_for_report}),
