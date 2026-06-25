@@ -237,36 +237,6 @@ def fits_open_smart(path):
         raise
 
 
-# ==========================================================
-# SIMBAD INTEGRATION
-# ==========================================================
-@st.cache_data(ttl=3600)
-def simbad_query(target_name: str):
-    try:
-        simbad = Simbad()
-        simbad.add_votable_fields("sptype", "distance", "flux(V)", "otype")
-        result = simbad.query_object(target_name)
-        if result is None or len(result) == 0:
-            return None
-        row = result[0]
-        def safe(col):
-            try:
-                v = row[col]
-                return str(v) if v is not None and str(v) != "--" else None
-            except Exception:
-                return None
-        return {
-            "main_id": safe("MAIN_ID"),
-            "otype": safe("OTYPE"),
-            "sptype": safe("SP_TYPE"),
-            "distance": safe("Distance_distance"),
-            "dist_unit": safe("Distance_unit"),
-            "flux_v": safe("FLUX_V"),
-        }
-    except Exception as e:
-        return {"_error": str(e)}
-
-
 @st.cache_data(ttl=3600)
 def mast_search_target(target_name, mission=None, radius="0.05 deg"):
     """
