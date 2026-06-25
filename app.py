@@ -807,9 +807,7 @@ with tabs[3]:
         img_lognorm = st.checkbox("Log scale (LogNorm)", value=False,
             help="Useful for wide dynamic range images (HST, PS1)")
 
-    if image_render_count == 0 and not any(
-        r.get("path") for r in results
-    ):
+    if image_render_count == 0 and not any(r.get("path") for r in results):
         st.info("No FITS files with 2D image HDUs found.")
 
     for r in results:
@@ -822,34 +820,21 @@ with tabs[3]:
             break
 
         file_path = r.get("path")
-
-        if not file_path:
-            continue
-
-        if file_path in seen_files:
+        if not file_path or file_path in seen_files:
             continue
 
         seen_files.add(file_path)
 
         try:
             with fits_open_smart(file_path) as hdul:
-                                    for idx, hdu in enumerate(hdul):
-                        if image_render_count >= MAX_IMAGES:
-                            break
+                for idx, hdu in enumerate(hdul):
+                    if image_render_count >= MAX_IMAGES:
+                        break
 
-                        if hdu.data is None:
-                            continue
+                    if hdu.data is None:
+                        continue
 
-                        plot_data = np.asarray(hdu.data, dtype=float)
-
-                        if plot_data.ndim == 2:
-                            display_data = plot_data
-                        elif plot_data.ndim == 3:
-                            display_data = plot_data[0] if len(plot_data) > 0 else plot_data
-                        elif plot_data.ndim == 4:
-                            display_data = plot_data[0, 0] if len(plot_data) > 0 else plot_data
-                        else:
-                            continue
+                    plot_data = np.asarray(hdu.data, dtype=float)
 
                     if plot_data.ndim == 2:
                         display_data = plot_data
@@ -884,21 +869,22 @@ with tabs[3]:
                     ax.set_title(f"{r['file']} · HDU {idx}", fontsize=10)
                     st.pyplot(fig)
 
-                        if enable_downloads:
-                            buf = io.BytesIO()
-                            fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
-                            buf.seek(0)
-                            dl_key = make_key(r['file'], idx, 'image_download')
-                            st.download_button(
-                                label=f"⬇ Download Image (PNG, 200 dpi) — {r['file']} HDU {idx}",
-                                data=buf,
-                                file_name=f"{r['file']}_hdu{idx}_{img_cmap}.png",
-                                mime="image/png",
-                                key=dl_key
-                            )
-                        plt.close(fig)
+                    if enable_downloads:
+                        buf = io.BytesIO()
+                        fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
+                        buf.seek(0)
+                        dl_key = make_key(r['file'], idx, 'image_download')
+                        st.download_button(
+                            label=f"⬇ Download Image (PNG, 200 dpi) — {r['file']} HDU {idx}",
+                            data=buf,
+                            file_name=f"{r['file']}_hdu{idx}_{img_cmap}.png",
+                            mime="image/png",
+                            key=dl_key
+                        )
+                    plt.close(fig)
         except Exception as e:
             st.warning(f"Could not open {r.get('file')} for images: {e}")
+
     if not found_image:
         st.info("No 2D images found in uploaded FITS files.")
 
@@ -921,7 +907,6 @@ with tabs[4]:
         tmp_pdf = os.path.join(tempfile.gettempdir(), f"astroflow_report_{int(time.time())}.pdf")
         plots = []
         images = []
-        # tables = []  # Removed - no CSV tables in PDF
 
         spec_results_for_report = [r for r in results if r.get("wl") is not None and r.get("fl") is not None]
 
@@ -944,19 +929,14 @@ with tabs[4]:
             buf = io.BytesIO()
             fig_rpt, ax_rpt = plt.subplots(figsize=(8, 4.5), dpi=200)
 
-            # Raw spectrum
             ax_rpt.plot(wl, fl, color='steelblue', alpha=0.7, linewidth=1.2, label='Raw')
-
-            # Smoothed spectrum (if enabled)
             if fl_smooth_rpt is not None:
                 ax_rpt.plot(wl, fl_smooth_rpt, color='red', linewidth=2.0, label='Smoothed')
 
-            # Ensure full data range is shown clearly
             ax_rpt.set_xlabel(x_label, fontsize=11)
             ax_rpt.set_ylabel(y_label, fontsize=11)
             ax_rpt.set_title(f"{res['file']} · HDU {res.get('hdu_index')}", fontsize=12)
 
-            # Auto-adjust limits to data range
             ax_rpt.margins(x=0.02, y=0.05)
             ax_rpt.autoscale(enable=True, axis='both', tight=False)
 
@@ -968,6 +948,7 @@ with tabs[4]:
             plt.close(fig_rpt)
             buf.seek(0)
 
+            # Unique filename to prevent collisions
             import uuid
             unique_id = uuid.uuid4().hex[:12]
             img_path = os.path.join(tempfile.gettempdir(), f"spectrum_{unique_id}.png")
@@ -975,7 +956,7 @@ with tabs[4]:
                 fh.write(buf.read())
             plots.append(img_path)
 
-        # Collect 2D FITS images
+        # Collect 2D FITS images (supports cubes)
         img_count_rpt = 0
         for r in results:
             if img_count_rpt >= MAX_IMAGES:
@@ -987,7 +968,7 @@ with tabs[4]:
                     for idx, hdu in enumerate(hdul):
                         if img_count_rpt >= MAX_IMAGES:
                             break
-                                                    if hdu.data is None:
+                        if hdu.data is None:
                             continue
                         plot_data = np.asarray(hdu.data, dtype=float)
 
@@ -1000,7 +981,8 @@ with tabs[4]:
                         else:
                             continue
 
-                        img_path = os.path.join(tempfile.gettempdir(), f"image_{uuid.uuid4().hex[:12]}.png")
+                        unique_id = uuid.uuid4().hex[:12]
+                        img_path = os.path.join(tempfile.gettempdir(), f"image_{unique_id}.png")
                         vmin = np.nanpercentile(display_data, 1)
                         vmax = np.nanpercentile(display_data, 99)
                         plt.imsave(img_path, np.clip(display_data, vmin, vmax), cmap="gray", origin="lower")
@@ -1011,40 +993,38 @@ with tabs[4]:
 
         report_progress.progress(90, text="Compiling PDF…")
 
+        # Validate files before PDF generation
+        plots = [p for p in plots if os.path.exists(p)]
+        images = [p for p in images if os.path.exists(p)]
+
+        st.info(f"✅ Report will include: {len(plots)} spectrum plots + {len(images)} images")
+
         # Sanitized metadata
         safe_title = f"AstroFlow Analysis Report - {rpt_target}".replace('\u2014', '-').replace('\u2013', '-')
         safe_notes = (rpt_notes or "").replace('\u2014', '-').replace('\u2013', '-').replace('\u2018', "'").replace('\u2019', "'")
 
         simbad_info = st.session_state.get("simbad_result") or {}
         report_metadata = {
-            "title":     safe_title,
-            "author":    rpt_author,
-            "target":    rpt_target,
+            "title": safe_title,
+            "author": rpt_author,
+            "target": rpt_target,
             "instrument": rpt_instrument,
-            "notes":     safe_notes,
+            "notes": safe_notes,
             "generated": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
             "n_spectra": len(spec_results_for_report),
-            "files":     list({r["file"] for r in spec_results_for_report}),
-            "simbad_otype":  simbad_info.get("otype", ""),
+            "files": list({r["file"] for r in spec_results_for_report}),
+            "simbad_otype": simbad_info.get("otype", ""),
             "simbad_sptype": simbad_info.get("sptype", ""),
-            "simbad_dist":   simbad_info.get("distance", ""),
+            "simbad_dist": simbad_info.get("distance", ""),
         }
 
-
-
-              # Validate files before PDF generation
-        plots = [p for p in plots if os.path.exists(p)]
-        images = [p for p in images if os.path.exists(p)]
-
-        st.info(f"✅ Report will include: {len(plots)} spectrum plots + {len(images)} images")
-      
         # Generate PDF
         try:
             pdf_path = generate_pdf_report(
                 output_path=tmp_pdf,
                 metadata=report_metadata,
                 plots=plots,
-                tables=[],      # Empty - no tables
+                tables=[],
                 images=images,
             )
         except Exception as e:
@@ -1067,6 +1047,7 @@ with tabs[4]:
                 )
         else:
             st.error("PDF report was not generated.")
+
 
 # ---------------------------
 # Anomaly Detection tab
