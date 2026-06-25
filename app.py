@@ -833,13 +833,23 @@ with tabs[3]:
 
         try:
             with fits_open_smart(file_path) as hdul:
-                for idx, hdu in enumerate(hdul):
-                    if image_render_count >= MAX_IMAGES:
-                        break
+                                    for idx, hdu in enumerate(hdul):
+                        if image_render_count >= MAX_IMAGES:
+                            break
 
-                                          if hdu.data is None:
-                        continue
-                    plot_data = np.asarray(hdu.data, dtype=float)
+                        if hdu.data is None:
+                            continue
+
+                        plot_data = np.asarray(hdu.data, dtype=float)
+
+                        if plot_data.ndim == 2:
+                            display_data = plot_data
+                        elif plot_data.ndim == 3:
+                            display_data = plot_data[0] if len(plot_data) > 0 else plot_data
+                        elif plot_data.ndim == 4:
+                            display_data = plot_data[0, 0] if len(plot_data) > 0 else plot_data
+                        else:
+                            continue
 
                     if plot_data.ndim == 2:
                         display_data = plot_data
@@ -958,7 +968,9 @@ with tabs[4]:
             plt.close(fig_rpt)
             buf.seek(0)
 
-            img_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res.get('hdu_index')}_spectrum.png")
+            import uuid
+            unique_id = uuid.uuid4().hex[:12]
+            img_path = os.path.join(tempfile.gettempdir(), f"spectrum_{unique_id}.png")
             with open(img_path, "wb") as fh:
                 fh.write(buf.read())
             plots.append(img_path)
@@ -975,25 +987,25 @@ with tabs[4]:
                     for idx, hdu in enumerate(hdul):
                         if img_count_rpt >= MAX_IMAGES:
                             break
-                                                if hdu.data is None:
+                                                    if hdu.data is None:
                             continue
                         plot_data = np.asarray(hdu.data, dtype=float)
 
                         if plot_data.ndim == 2:
                             display_data = plot_data
                         elif plot_data.ndim == 3:
-                            display_data = plot_data[0]
+                            display_data = plot_data[0] if len(plot_data) > 0 else plot_data
                         elif plot_data.ndim == 4:
-                            display_data = plot_data[0, 0]
+                            display_data = plot_data[0, 0] if len(plot_data) > 0 else plot_data
                         else:
                             continue
 
-                        img_path = ...
+                        img_path = os.path.join(tempfile.gettempdir(), f"image_{uuid.uuid4().hex[:12]}.png")
                         vmin = np.nanpercentile(display_data, 1)
                         vmax = np.nanpercentile(display_data, 99)
                         plt.imsave(img_path, np.clip(display_data, vmin, vmax), cmap="gray", origin="lower")
-                            images.append(img_path)
-                            img_count_rpt += 1
+                        images.append(img_path)
+                        img_count_rpt += 1
             except Exception as e:
                 st.warning(f"Could not read images from {r.get('file')}: {e}")
 
@@ -1018,6 +1030,14 @@ with tabs[4]:
             "simbad_dist":   simbad_info.get("distance", ""),
         }
 
+
+
+              # Validate files before PDF generation
+        plots = [p for p in plots if os.path.exists(p)]
+        images = [p for p in images if os.path.exists(p)]
+
+        st.info(f"✅ Report will include: {len(plots)} spectrum plots + {len(images)} images")
+      
         # Generate PDF
         try:
             pdf_path = generate_pdf_report(
