@@ -206,12 +206,6 @@ def calc_snr_on_band(ref_wl, ref_flux, band_range: Tuple[float, float]):
         return 0.0
     return float(signal / noise)
 
-DEFAULT_BANDS = {
-    "H2O": (1.35, 1.45),
-    "CH4": (1.60, 1.72),
-    "CO2": (2.65, 2.75),
-}
-
 # ==========================================================
 # MAST ARCHIVE INTEGRATION
 # ==========================================================
@@ -349,7 +343,6 @@ st.sidebar.header("AstroFlow Controls")
 st.sidebar.markdown("Upload FITS/CSV files and toggle analysis options.")
 
 with st.sidebar.expander("Spectrum Processing", expanded=True):
-    smoothing_enabled = st.checkbox("Enable smoothing", value=True)
     smoothing_window = st.slider("Smoothing window (odd)", 5, 501, 51, step=2)
     polyorder = st.slider("SavGol polyorder", 1, 5, 3)
 
@@ -400,10 +393,6 @@ if mast_search_btn:
             )
 
 with st.sidebar.expander("Display / Export", expanded=True):
-    show_errorbars = st.checkbox("Show error bars (if available)", value=False)
-    raw_only = st.checkbox("Show raw data only", value=False)
-    stack_enabled = st.checkbox("Enable stacking (multi-file)", value=True)
-    stack_method = st.selectbox("Stack method", ["mean", "median"], index=0)
     enable_downloads = st.checkbox("Enable downloads", value=True)
 
 st.sidebar.markdown("---")
