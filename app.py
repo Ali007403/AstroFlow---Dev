@@ -22,7 +22,7 @@ st.set_page_config(page_title="AstroFlow · FITSFlow", layout="wide", initial_si
 # ---------------------------
 MAX_PRODUCTS   = 5          # Max MAST products to download in one click
 MAX_FILE_MB    = 500        # Skip FITS files larger than this (MB)
-MAX_IMAGES     = 100         # Max 2D HDU images rendered in Images tab
+MAX_IMAGES     = 10          # Max 2D HDU images rendered in Images tab
 MAX_HDU_ROWS   = 50_000     # Truncate very wide image HDUs before nanmean
 
 # ---------------------------
@@ -146,6 +146,10 @@ def build_stacked_spectrum(
     ]
 
     arr = np.array(interp_fluxes)
+
+    # Guard: if every row is all-NaN (e.g. 2D image HDUs), return empty
+    if arr.size == 0 or not np.any(np.isfinite(arr)):
+        return ref_wl, np.full_like(ref_wl, np.nan)
 
     with np.errstate(invalid='ignore', divide='ignore'):
         stacked = np.nanmedian(arr, axis=0) if method == "median" else np.nanmean(arr, axis=0)
@@ -343,9 +347,11 @@ st.sidebar.header("AstroFlow Controls")
 st.sidebar.markdown("Upload FITS/CSV files and toggle analysis options.")
 
 with st.sidebar.expander("Spectrum Processing", expanded=True):
-    enable_downloads = st.checkbox("Enable downloads", value=True)
+    enable_downloads = st.checkbox("Enable downloads", value=True, key="cb_enable_downloads")
+    smoothing_enabled = st.checkbox("Enable smoothing", value=True, key="cb_smoothing_enabled")
     smoothing_window = st.slider("Smoothing window (odd)", 5, 501, 51, step=2)
     polyorder = st.slider("SavGol polyorder", 1, 5, 3)
+    show_errorbars = st.checkbox("Show error bars (if available)", value=False, key="cb_show_errorbars")
 
 with st.sidebar.expander("MAST Archive", expanded=True):
     mast_target = st.text_input(
@@ -657,9 +663,8 @@ with tabs[0]:
 # ==================== COMBINED SPECTRUM TAB ====================
 with tabs[1]:
     st.header("Spectrum")
-    show_smooth = st.checkbox("Show smoothed version", value=True, key="spectrum_smooth")
 
-    for res in results:
+    for ri, res in enumerate(results):
         if res.get("wl") is None or res.get("fl") is None:
             continue
 
@@ -671,29 +676,30 @@ with tabs[1]:
             y_label = res.get("y_label", "Flux")
 
             fl_smooth = None
-            if show_smooth:
+            if smoothing_enabled:
                 fl_smooth = smooth_flux(fl.copy(), smoothing_window, polyorder)
 
-            # === IMPROVED UNIQUE KEY ===
-            unique_key = make_key(
-                res.get('file', ''), 
-                res.get('hdu_index', ''), 
-                res.get('path', ''),      # path makes it more unique
-                hashlib.md5(str(res.get('wl', ''))[:50].encode()).hexdigest()[:6]  # extra safety
+            # Unique key: file + hdu_index + loop counter avoids hash collisions
+            # across multiple HDUs from the same FITS file
+            chart_key = make_key(
+                res.get('file', ''),
+                res.get('hdu_index', ''),
+                ri,        # loop counter breaks ties from identical file+hdu combos
+                'spectrum'
             )
 
             fig = plot_spectrum_interactive(
-                wl, fl, 
+                wl, fl,
                 fl_smooth=fl_smooth,
                 err=res.get('err'),
                 title=label,
                 bands=None,
                 show_bands_flag=False,
-                show_error=False,
+                show_error=show_errorbars,
                 x_label=x_label,
                 y_label=y_label
             )
-            st.plotly_chart(fig, width='stretch', key=unique_key)
+            st.plotly_chart(fig, width='stretch', key=chart_key)
 
             # Downloads
             if enable_downloads:
@@ -706,7 +712,7 @@ with tabs[1]:
                     df.to_csv(index=False).encode('utf-8'),
                     file_name=f"{res['file']}_hdu{res.get('hdu_index')}.csv",
                     mime='text/csv',
-                    key=make_key(res.get('file'), res.get('hdu_index'), 'dl')
+                    key=make_key(res.get('file'), res.get('hdu_index'), ri, 'dl')
                 )
 
 
@@ -723,7 +729,7 @@ with tabs[2]:
         else:
             st.write("No 1D data for this file.")
             continue
-        st.dataframe(df.head(500), use_container_width='stretch')
+        st.dataframe(df.head(500), use_container_width=True)
         if enable_downloads:
             dl_key = make_key(r.get('file'), r.get('hdu_index'), 'download', 'table_csv')
             st.download_button(f"Download CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv', key=dl_key)
@@ -978,8 +984,9 @@ with tabs[5]:
         spike_std = st.slider("Spike std-factor", 2, 20, 6)
 
     anomalies_all = []
+    expected_keys = ["type", "wl", "index", "value"]  # defined here so summary section can always use it
 
-    for res in results:
+    for ai, res in enumerate(results):
         if res.get("wl") is None or res.get("fl") is None:
             continue
 
@@ -1015,10 +1022,9 @@ with tabs[5]:
             y_label=y_label
         )
         fig = annotate_plotly(fig, anoms)
-        st.plotly_chart(fig, width='stretch', key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot'))
+        st.plotly_chart(fig, width='stretch', key=make_key(res['file'], res.get('hdu_index'), ai, 'anomaly_plot'))
 
         # Normalize anomalies: ensure all expected keys exist
-        expected_keys = ["type", "wl", "index", "value"]
         normalized_anoms = [{k: a.get(k, np.nan) for k in expected_keys} for a in anoms]
 
         if normalized_anoms:
@@ -1028,7 +1034,7 @@ with tabs[5]:
             if enable_downloads:
                 # JSON download
                 import json
-                dl_key_json = make_key(res['file'], res.get('hdu_index'), 'anoms_json')
+                dl_key_json = make_key(res['file'], res.get('hdu_index'), ai, 'anoms_json')
                 st.download_button(
                     f"Download anomalies JSON - {res['file']}",
                     json.dumps(anoms, indent=2).encode('utf-8'),
@@ -1038,7 +1044,7 @@ with tabs[5]:
                 )
 
                 # CSV download
-                dl_key_csv = make_key(res['file'], res.get('hdu_index'), 'anoms_csv')
+                dl_key_csv = make_key(res['file'], res.get('hdu_index'), ai, 'anoms_csv')
                 st.download_button(
                     f"Download anomalies CSV - {res['file']}",
                     df_anoms.to_csv(index=False).encode('utf-8'),
