@@ -674,8 +674,13 @@ with tabs[1]:
             if show_smooth:
                 fl_smooth = smooth_flux(fl.copy(), smoothing_window, polyorder)
 
-            # Use more unique key to prevent duplicates
-            chart_key = make_key(res.get('file'), res.get('hdu_index'), res.get('path', ''), 'spectrum')
+            # === IMPROVED UNIQUE KEY ===
+            unique_key = make_key(
+                res.get('file', ''), 
+                res.get('hdu_index', ''), 
+                res.get('path', ''),      # path makes it more unique
+                hashlib.md5(str(res.get('wl', ''))[:50].encode()).hexdigest()[:6]  # extra safety
+            )
 
             fig = plot_spectrum_interactive(
                 wl, fl, 
@@ -688,8 +693,9 @@ with tabs[1]:
                 x_label=x_label,
                 y_label=y_label
             )
-            st.plotly_chart(fig, width='stretch', key=chart_key)
+            st.plotly_chart(fig, width='stretch', key=unique_key)
 
+            # Downloads
             if enable_downloads:
                 df_data = {x_label: wl, y_label: fl}
                 if fl_smooth is not None:
@@ -700,8 +706,9 @@ with tabs[1]:
                     df.to_csv(index=False).encode('utf-8'),
                     file_name=f"{res['file']}_hdu{res.get('hdu_index')}.csv",
                     mime='text/csv',
-                    key=make_key(res.get('file'), res.get('hdu_index'), 'download')
+                    key=make_key(res.get('file'), res.get('hdu_index'), 'dl')
                 )
+
 
 # Data Table tab
 with tabs[2]:
@@ -716,7 +723,7 @@ with tabs[2]:
         else:
             st.write("No 1D data for this file.")
             continue
-        st.dataframe(df.head(500), use_container_width=True)
+        st.dataframe(df.head(500), use_container_width='stretch')
         if enable_downloads:
             dl_key = make_key(r.get('file'), r.get('hdu_index'), 'download', 'table_csv')
             st.download_button(f"Download CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv', key=dl_key)
