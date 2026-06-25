@@ -102,24 +102,32 @@ def try_extract_spectrum(hdu):
         pass
 
     # Image-like HDU: collapse to 1D or return pixel index
+      # Image-like / multi-dimensional HDU support
     try:
-        arr = np.array(data)
+        arr = np.asarray(data, dtype=float)
+        if arr.ndim == 0:
+            return None, None, default_labels
+
         if arr.ndim == 1:
             wl = np.arange(arr.size)
-            fl = arr.astype(float)
-            mask = np.isfinite(fl)
-            return wl[mask], fl[mask], {"x_label": "Index", "y_label": "Value"}
+            fl = arr
         elif arr.ndim == 2:
-            # Guard against empty-slice RuntimeWarning on zero-row 2D HDUs
-            if arr.shape[0] == 0 or arr.shape[1] == 0:
-                return None, None, default_labels
-            with np.errstate(all="ignore"):
-                fl = np.nanmean(arr, axis=0)
-            if not np.any(np.isfinite(fl)):
-                return None, None, default_labels
+            fl = np.nanmean(arr, axis=0)
             wl = np.arange(fl.size)
-            mask = np.isfinite(fl)
-            return wl[mask], fl[mask], {"x_label": "Pixel", "y_label": "Mean(pixel rows)"}
+        elif arr.ndim == 3:
+            collapsed = np.nanmean(arr, axis=0)
+            fl = np.nanmean(collapsed, axis=0)
+            wl = np.arange(fl.size)
+        elif arr.ndim == 4:
+            collapsed = np.nanmean(arr, axis=(0, 1))
+            fl = np.nanmean(collapsed, axis=0)
+            wl = np.arange(fl.size)
+        else:
+            return None, None, default_labels
+
+        mask = np.isfinite(fl)
+        if np.any(mask):
+            return wl[mask], fl[mask], {"x_label": "Pixel", "y_label": "Mean Intensity"}
     except Exception:
         pass
 
@@ -228,42 +236,37 @@ def fits_open_smart(path):
             return fits.open(path, memmap=False)
         raise
 
+
 # ==========================================================
 # SIMBAD INTEGRATION
 # ==========================================================
-# Configure SIMBAD to return extra fields useful for reports
-_simbad = Simbad()
-_simbad.add_votable_fields("sptype", "distance", "flux(V)", "otype", "rv_value", "z_value")
-
 @st.cache_data(ttl=3600)
 def simbad_query(target_name: str):
-    """
-    Query SIMBAD for object metadata.
-    Returns a dict of useful fields, or None on failure.
-    """
     try:
-        result = _simbad.query_object(target_name)
+        simbad = Simbad()
+        simbad.add_votable_fields("sptype", "distance", "flux(V)", "otype")
+        result = simbad.query_object(target_name)
         if result is None or len(result) == 0:
             return None
         row = result[0]
         def safe(col):
             try:
                 v = row[col]
-                return str(v) if v is not None and v != "--" else None
+                return str(v) if v is not None and str(v) != "--" else None
             except Exception:
                 return None
         return {
-            "main_id":    safe("MAIN_ID"),
-            "otype":      safe("OTYPE"),
-            "sptype":     safe("SP_TYPE"),
-            "distance":   safe("Distance_distance"),
-            "dist_unit":  safe("Distance_unit"),
-            "flux_v":     safe("FLUX_V"),
-            "rv":         safe("RV_VALUE"),
-            "redshift":   safe("Z_VALUE"),
+            "main_id": safe("MAIN_ID"),
+            "otype": safe("OTYPE"),
+            "sptype": safe("SP_TYPE"),
+            "distance": safe("Distance_distance"),
+            "dist_unit": safe("Distance_unit"),
+            "flux_v": safe("FLUX_V"),
         }
     except Exception as e:
         return {"_error": str(e)}
+
+
 @st.cache_data(ttl=3600)
 def mast_search_target(target_name, mission=None, radius="0.05 deg"):
     """
@@ -833,32 +836,43 @@ with tabs[3]:
                 for idx, hdu in enumerate(hdul):
                     if image_render_count >= MAX_IMAGES:
                         break
-                    if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
-                        found_image = True
-                        image_render_count += 1
-                        st.subheader(f"{r['file']} (HDU {idx}) — Image ({hdu.data.shape[0]}×{hdu.data.shape[1]} px)")
 
-                        fig, ax = plt.subplots(figsize=(7, 5), dpi=120)
-                        plot_data = hdu.data.astype(float)
+                                          if hdu.data is None:
+                        continue
+                    plot_data = np.asarray(hdu.data, dtype=float)
 
-                        try:
-                            import matplotlib.colors as mcolors
-                            if img_lognorm:
-                                # Clip negatives for LogNorm
-                                vmin = np.nanpercentile(plot_data[plot_data > 0], 1) if np.any(plot_data > 0) else 1e-6
-                                vmax = np.nanpercentile(plot_data, 99)
-                                norm = mcolors.LogNorm(vmin=max(vmin, 1e-10), vmax=max(vmax, 1e-9))
-                            else:
-                                vmin = np.nanpercentile(plot_data, 1)
-                                vmax = np.nanpercentile(plot_data, 99)
-                                norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
-                            im = ax.imshow(plot_data, cmap=img_cmap, origin="lower", aspect="auto", norm=norm)
-                        except Exception:
-                            im = ax.imshow(plot_data, cmap=img_cmap, origin="lower", aspect="auto")
+                    if plot_data.ndim == 2:
+                        display_data = plot_data
+                    elif plot_data.ndim == 3:
+                        display_data = plot_data[0] if len(plot_data) > 0 else plot_data
+                    elif plot_data.ndim == 4:
+                        display_data = plot_data[0, 0] if len(plot_data) > 0 else plot_data
+                    else:
+                        continue
 
-                        plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
-                        ax.set_title(f"{r['file']} · HDU {idx}", fontsize=10)
-                        st.pyplot(fig)
+                    found_image = True
+                    image_render_count += 1
+                    st.subheader(f"{r['file']} (HDU {idx}) — Image {display_data.shape}")
+
+                    fig, ax = plt.subplots(figsize=(7, 5), dpi=120)
+
+                    try:
+                        import matplotlib.colors as mcolors
+                        if img_lognorm and np.any(display_data > 0):
+                            vmin = np.nanpercentile(display_data[display_data > 0], 1)
+                            vmax = np.nanpercentile(display_data, 99)
+                            norm = mcolors.LogNorm(vmin=max(vmin, 1e-10), vmax=max(vmax, 1e-9))
+                        else:
+                            vmin = np.nanpercentile(display_data, 1)
+                            vmax = np.nanpercentile(display_data, 99)
+                            norm = mcolors.Normalize(vmin=vmin, vmax=vmax)
+                        im = ax.imshow(display_data, cmap=img_cmap, origin="lower", aspect="auto", norm=norm)
+                    except Exception:
+                        im = ax.imshow(display_data, cmap=img_cmap, origin="lower", aspect="auto")
+
+                    plt.colorbar(im, ax=ax, fraction=0.046, pad=0.04)
+                    ax.set_title(f"{r['file']} · HDU {idx}", fontsize=10)
+                    st.pyplot(fig)
 
                         if enable_downloads:
                             buf = io.BytesIO()
@@ -961,12 +975,23 @@ with tabs[4]:
                     for idx, hdu in enumerate(hdul):
                         if img_count_rpt >= MAX_IMAGES:
                             break
-                        if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
-                            img_path = os.path.join(tempfile.gettempdir(), f"{r['file']}_hdu{idx}_image.png")
-                            plot_data = hdu.data.astype(float)
-                            vmin = np.nanpercentile(plot_data, 1)
-                            vmax = np.nanpercentile(plot_data, 99)
-                            plt.imsave(img_path, np.clip(plot_data, vmin, vmax), cmap="gray", origin="lower")
+                                                if hdu.data is None:
+                            continue
+                        plot_data = np.asarray(hdu.data, dtype=float)
+
+                        if plot_data.ndim == 2:
+                            display_data = plot_data
+                        elif plot_data.ndim == 3:
+                            display_data = plot_data[0]
+                        elif plot_data.ndim == 4:
+                            display_data = plot_data[0, 0]
+                        else:
+                            continue
+
+                        img_path = ...
+                        vmin = np.nanpercentile(display_data, 1)
+                        vmax = np.nanpercentile(display_data, 99)
+                        plt.imsave(img_path, np.clip(display_data, vmin, vmax), cmap="gray", origin="lower")
                             images.append(img_path)
                             img_count_rpt += 1
             except Exception as e:
