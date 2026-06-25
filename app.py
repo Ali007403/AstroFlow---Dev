@@ -343,6 +343,7 @@ st.sidebar.header("AstroFlow Controls")
 st.sidebar.markdown("Upload FITS/CSV files and toggle analysis options.")
 
 with st.sidebar.expander("Spectrum Processing", expanded=True):
+    enable_downloads = st.checkbox("Enable downloads", value=True)
     smoothing_window = st.slider("Smoothing window (odd)", 5, 501, 51, step=2)
     polyorder = st.slider("SavGol polyorder", 1, 5, 3)
 
@@ -392,11 +393,6 @@ if mast_search_btn:
                 "No observations found."
             )
 
-with st.sidebar.expander("Display / Export", expanded=True):
-    enable_downloads = st.checkbox("Enable downloads", value=True)
-
-st.sidebar.markdown("---")
-st.sidebar.caption("Prototype · AstroFlow / FutureMind")
 
 # ---------------------------
 # Main UI area
