@@ -22,7 +22,7 @@ st.set_page_config(page_title="AstroFlow · FITSFlow", layout="wide", initial_si
 # ---------------------------
 MAX_PRODUCTS   = 5          # Max MAST products to download in one click
 MAX_FILE_MB    = 500        # Skip FITS files larger than this (MB)
-MAX_IMAGES     = 10         # Max 2D HDU images rendered in Images tab
+MAX_IMAGES     = 100         # Max 2D HDU images rendered in Images tab
 MAX_HDU_ROWS   = 50_000     # Truncate very wide image HDUs before nanmean
 
 # ---------------------------
