@@ -138,27 +138,19 @@ def build_stacked_spectrum(
     min_wl = min(np.nanmin(r["wl"]) for r in spectra)
     max_wl = max(np.nanmax(r["wl"]) for r in spectra)
 
-    ref_wl = np.linspace(
-        min_wl,
-        max_wl,
-        2000
-    )
+    ref_wl = np.linspace(min_wl, max_wl, 2000)
 
     interp_fluxes = [
-        interp_to_reference(
-            r["wl"],
-            r["fl"],
-            ref_wl
-        )
+        interp_to_reference(r["wl"], r["fl"], ref_wl)
         for r in spectra
     ]
 
     arr = np.array(interp_fluxes)
 
-        with np.errstate(invalid='ignore', divide='ignore'):
+    with np.errstate(invalid='ignore', divide='ignore'):
         stacked = np.nanmedian(arr, axis=0) if method == "median" else np.nanmean(arr, axis=0)
 
-    # HARD CLEAN after stacking (critical fix)
+    # HARD CLEAN after stacking
     stacked = np.asarray(stacked, dtype=float)
     stacked[~np.isfinite(stacked)] = np.nan
 
