@@ -563,7 +563,6 @@ if len(results) == 0 and mast_results is None:
 tabs = st.tabs([
     "MAST Archive",
     "Raw Spectrum",
-    "Smoothed",
     "Data Table",
     "Images",
     "Reports",
