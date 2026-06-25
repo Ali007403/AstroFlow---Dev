@@ -353,13 +353,6 @@ with st.sidebar.expander("Spectrum Processing", expanded=True):
     smoothing_window = st.slider("Smoothing window (odd)", 5, 501, 51, step=2)
     polyorder = st.slider("SavGol polyorder", 1, 5, 3)
 
-    show_bands = st.checkbox("Show molecular bands (overlay)", value=True)
-    selected_bands = st.multiselect(
-        "Select molecular bands to display",
-        options=list(DEFAULT_BANDS.keys()),
-        default=list(DEFAULT_BANDS.keys())
-    )
-
 with st.sidebar.expander("MAST Archive", expanded=True):
     mast_target = st.text_input(
         "Target Name",
@@ -383,6 +376,13 @@ with st.sidebar.expander("MAST Archive", expanded=True):
         "Search MAST"
     )
 
+with st.sidebar.expander("Display / Export", expanded=True):
+    show_errorbars = st.checkbox("Show error bars (if available)", value=False)
+    raw_only = st.checkbox("Show raw data only", value=False)
+    stack_enabled = st.checkbox("Enable stacking (multi-file)", value=True)
+    stack_method = st.selectbox("Stack method", ["mean", "median"], index=0)
+    enable_downloads = st.checkbox("Enable downloads", value=True)
+  
 # ==========================================================
 # RUN MAST SEARCH
 # ==========================================================
