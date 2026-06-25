@@ -376,12 +376,6 @@ with st.sidebar.expander("MAST Archive", expanded=True):
         "Search MAST"
     )
 
-with st.sidebar.expander("Display / Export", expanded=True):
-    show_errorbars = st.checkbox("Show error bars (if available)", value=False)
-    raw_only = st.checkbox("Show raw data only", value=False)
-    stack_enabled = st.checkbox("Enable stacking (multi-file)", value=True)
-    stack_method = st.selectbox("Stack method", ["mean", "median"], index=0)
-    enable_downloads = st.checkbox("Enable downloads", value=True)
   
 # ==========================================================
 # RUN MAST SEARCH
@@ -406,13 +400,10 @@ if mast_search_btn:
             )
 
 with st.sidebar.expander("Display / Export", expanded=True):
-    show_snr = st.checkbox("Show SNR", value=False)
     show_errorbars = st.checkbox("Show error bars (if available)", value=False)
-    raw_only = st.checkbox("Show raw data only (no smoothing/stacking overlays)", value=False)
-
+    raw_only = st.checkbox("Show raw data only", value=False)
     stack_enabled = st.checkbox("Enable stacking (multi-file)", value=True)
     stack_method = st.selectbox("Stack method", ["mean", "median"], index=0)
-
     enable_downloads = st.checkbox("Enable downloads", value=True)
 
 st.sidebar.markdown("---")
