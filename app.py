@@ -671,7 +671,7 @@ with tabs[1]:
             y_label = res.get("y_label", "Flux")
 
             fl_smooth = None
-            if show_smooth and smoothing_enabled and not raw_only:
+            if show_smooth:
                 fl_smooth = smooth_flux(fl.copy(), smoothing_window, polyorder)
 
             fig = plot_spectrum_interactive(
@@ -681,13 +681,12 @@ with tabs[1]:
                 title=label,
                 bands=None,
                 show_bands_flag=False,
-                show_error=show_errorbars,
+                show_error=False,          # Hardcoded off since we removed the toggle
                 x_label=x_label,
                 y_label=y_label
             )
             st.plotly_chart(fig, width='stretch', key=make_key(res['file'], res['hdu_index'], 'spectrum'))
 
-            # Downloads
             if enable_downloads:
                 df_data = {x_label: wl, y_label: fl}
                 if fl_smooth is not None:
