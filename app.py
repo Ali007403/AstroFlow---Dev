@@ -155,7 +155,6 @@ def build_stacked_spectrum(
     stacked[~np.isfinite(stacked)] = np.nan
 
     return ref_wl, stacked
-
 #=============================
 
 def smooth_flux(flux, window, polyorder):
@@ -838,10 +837,11 @@ with tabs[3]:
     if not found_image:
         st.info("No 2D images found in uploaded FITS files.")
 
+
 # Reports tab
 with tabs[4]:
     st.header("Generate PDF Report")
-    st.markdown("Compile spectra, images, and tables into a single PDF.")
+    st.markdown("Compile spectra plots and FITS images into a single PDF.")
 
     # Report metadata inputs
     rpt_col1, rpt_col2 = st.columns(2)
@@ -856,59 +856,59 @@ with tabs[4]:
         tmp_pdf = os.path.join(tempfile.gettempdir(), f"astroflow_report_{int(time.time())}.pdf")
         plots = []
         images = []
-        tables = []
+        # tables = []  # Removed - no CSV tables in PDF
 
         spec_results_for_report = [r for r in results if r.get("wl") is not None and r.get("fl") is not None]
 
         report_progress = st.progress(0, text="Building report…")
         n_report_steps = max(len(spec_results_for_report) + 1, 1)
 
-        # Save 1D spectra as PNGs using Matplotlib (raw + smoothed overlay)
+        # Save 1D spectra as clean PNGs
         for ri, res in enumerate(spec_results_for_report):
             report_progress.progress(
                 int(ri / n_report_steps * 80),
                 text=f"Plotting spectrum {ri + 1}/{len(spec_results_for_report)}…"
             )
-            wl, fl = res["wl"], res["fl"]
+            wl = res["wl"]
+            fl = res["fl"]
             x_label = res.get("x_label", "Wavelength")
             y_label = res.get("y_label", "Flux")
 
             fl_smooth_rpt = smooth_flux(fl.copy(), smoothing_window, polyorder) if smoothing_enabled else None
 
             buf = io.BytesIO()
-            fig_rpt, ax_rpt = plt.subplots(figsize=(7, 4))
-            ax_rpt.plot(wl, fl, color='steelblue', alpha=0.55, linewidth=0.8, label='Raw')
+            fig_rpt, ax_rpt = plt.subplots(figsize=(8, 4.5), dpi=200)
+
+            # Raw spectrum
+            ax_rpt.plot(wl, fl, color='steelblue', alpha=0.7, linewidth=1.2, label='Raw')
+
+            # Smoothed spectrum (if enabled)
             if fl_smooth_rpt is not None:
-                ax_rpt.plot(wl, fl_smooth_rpt, color='black', linewidth=1.4, label='Smoothed')
-            # Molecular band overlays
-            if show_bands:
-                import matplotlib.patches as mpatches
-                for mol, (ba, bb) in {m: DEFAULT_BANDS[m] for m in selected_bands}.items():
-                    ax_rpt.axvspan(ba, bb, alpha=0.15, color='skyblue', label=mol)
-                    ax_rpt.text((ba + bb) / 2, ax_rpt.get_ylim()[1] if ax_rpt.get_ylim()[1] != 0 else 1,
-                                mol, ha='center', va='bottom', fontsize=7, color='navy')
-            ax_rpt.set_xlabel(x_label)
-            ax_rpt.set_ylabel(y_label)
-            ax_rpt.set_title(f"{res['file']} · HDU {res.get('hdu_index')}")
-            ax_rpt.legend(fontsize=8)
+                ax_rpt.plot(wl, fl_smooth_rpt, color='red', linewidth=2.0, label='Smoothed')
+
+            # Ensure full data range is shown clearly
+            ax_rpt.set_xlabel(x_label, fontsize=11)
+            ax_rpt.set_ylabel(y_label, fontsize=11)
+            ax_rpt.set_title(f"{res['file']} · HDU {res.get('hdu_index')}", fontsize=12)
+
+            # Auto-adjust limits to data range
+            ax_rpt.margins(x=0.02, y=0.05)
+            ax_rpt.autoscale(enable=True, axis='both', tight=False)
+
+            ax_rpt.legend(fontsize=10, loc='best')
+            ax_rpt.grid(True, alpha=0.3)
+
             plt.tight_layout()
-            plt.savefig(buf, format="png", dpi=200)
+            plt.savefig(buf, format="png", dpi=200, bbox_inches="tight")
             plt.close(fig_rpt)
             buf.seek(0)
+
             img_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res.get('hdu_index')}_spectrum.png")
             with open(img_path, "wb") as fh:
                 fh.write(buf.read())
             plots.append(img_path)
 
-            # Save CSV for each spectrum
-            df_rpt = pd.DataFrame({x_label: wl, y_label: fl})
-            if fl_smooth_rpt is not None:
-                df_rpt[f"{y_label}_smoothed"] = fl_smooth_rpt
-            csv_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res.get('hdu_index')}.csv")
-            df_rpt.to_csv(csv_path, index=False)
-            tables.append(csv_path)
-
-        # Collect 2D FITS images (capped at MAX_IMAGES)
+        # Collect 2D FITS images
         img_count_rpt = 0
         for r in results:
             if img_count_rpt >= MAX_IMAGES:
@@ -933,8 +933,7 @@ with tabs[4]:
 
         report_progress.progress(90, text="Compiling PDF…")
 
-        # Build enriched metadata for reporters module
-        # Sanitize strings for PDF compatibility
+        # Sanitized metadata
         safe_title = f"AstroFlow Analysis Report - {rpt_target}".replace('\u2014', '-').replace('\u2013', '-')
         safe_notes = (rpt_notes or "").replace('\u2014', '-').replace('\u2013', '-').replace('\u2018', "'").replace('\u2019', "'")
 
@@ -949,13 +948,13 @@ with tabs[4]:
             "files": list({r["file"] for r in spec_results_for_report}),
         }
 
-        # Generate PDF using reporters module
+        # Generate PDF
         try:
             pdf_path = generate_pdf_report(
                 output_path=tmp_pdf,
                 metadata=report_metadata,
                 plots=plots,
-                tables=tables,
+                tables=[],      # Empty - no tables
                 images=images,
             )
         except Exception as e:
@@ -967,7 +966,6 @@ with tabs[4]:
 
         if os.path.exists(pdf_path):
             with open(pdf_path, "rb") as f:
-                # Use a session counter as key suffix (avoids time.time() collision on fast re-runs)
                 rpt_key_n = st.session_state.get("_rpt_dl_n", 0) + 1
                 st.session_state["_rpt_dl_n"] = rpt_key_n
                 st.download_button(
