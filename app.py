@@ -538,7 +538,7 @@ if len(results) == 0 and mast_results is None:
 
 tabs = st.tabs([
     "MAST Archive",
-    "Raw Spectrum",
+    "Spectrum",
     "Data Table",
     "Images",
     "Reports",
@@ -663,7 +663,7 @@ with tabs[1]:
         if res.get("wl") is None or res.get("fl") is None:
             continue
 
-        label = f"{res['file']} (HDU {res['hdu_index']})"
+        label = f"{res['file']} (HDU {res.get('hdu_index')})"
         with st.expander(label, expanded=False):
             wl = res['wl']
             fl = res['fl']
@@ -674,6 +674,9 @@ with tabs[1]:
             if show_smooth:
                 fl_smooth = smooth_flux(fl.copy(), smoothing_window, polyorder)
 
+            # Use more unique key to prevent duplicates
+            chart_key = make_key(res.get('file'), res.get('hdu_index'), res.get('path', ''), 'spectrum')
+
             fig = plot_spectrum_interactive(
                 wl, fl, 
                 fl_smooth=fl_smooth,
@@ -681,11 +684,11 @@ with tabs[1]:
                 title=label,
                 bands=None,
                 show_bands_flag=False,
-                show_error=False,          # Hardcoded off since we removed the toggle
+                show_error=False,
                 x_label=x_label,
                 y_label=y_label
             )
-            st.plotly_chart(fig, width='stretch', key=make_key(res['file'], res['hdu_index'], 'spectrum'))
+            st.plotly_chart(fig, width='stretch', key=chart_key)
 
             if enable_downloads:
                 df_data = {x_label: wl, y_label: fl}
@@ -695,8 +698,9 @@ with tabs[1]:
                 st.download_button(
                     f"Download CSV - {res['file']}",
                     df.to_csv(index=False).encode('utf-8'),
-                    file_name=f"{res['file']}_hdu{res['hdu_index']}.csv",
-                    mime='text/csv'
+                    file_name=f"{res['file']}_hdu{res.get('hdu_index')}.csv",
+                    mime='text/csv',
+                    key=make_key(res.get('file'), res.get('hdu_index'), 'download')
                 )
 
 # Data Table tab
