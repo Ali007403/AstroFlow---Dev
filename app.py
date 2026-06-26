@@ -1,13 +1,24 @@
 # app.py (updated with dynamic axis labels)
 from FitsFlow.csv_handler import ingest_csv_file
-from FitsFlow.detectors import detect_anomalies, annotate_plotly
+from FitsFlow.detectors import annotate_plotly
 from FitsFlow.fields import map_columns
 from FitsFlow.reporters import generate_pdf_report
 
 import streamlit as st
 import numpy as np
 from astropy.io import fits
-from scipy.signal import savgol_filter
+from astropy.stats import sigma_clip, mad_std
+from scipy.signal import savgol_filter, find_peaks, peak_widths
+try:
+    from astropy import units as u
+    from astropy.nddata import StdDevUncertainty
+    from specutils import Spectrum1D
+    from specutils.fitting import find_lines_threshold
+except Exception:
+    u = None
+    StdDevUncertainty = None
+    Spectrum1D = None
+    find_lines_threshold = None
 import pandas as pd
 import tempfile, os, io, time, re, hashlib
 from typing import Tuple
@@ -83,7 +94,7 @@ NON_SCIENCE_EXTNAMES = {
 SUPPORTED_SCIENCE_TABLE_MIN_ROWS = 5
 MAX_MAST_RESULTS = 200
 MAST_TIMEOUT_S = 25
-ANOMALY_KEYS = ["type", "wl", "index", "value"]
+ANOMALY_KEYS = ["type", "wl", "index", "value", "score", "prominence", "width", "method"]
 
 def safe_names(arr):
     try:
@@ -272,6 +283,179 @@ def smooth_flux(flux, window, polyorder):
         return savgol_filter(flux, window, polyorder)
     except Exception:
         return flux
+
+
+def _interp_nans(y):
+    y = np.asarray(y, dtype=float)
+    if y.size == 0:
+        return y
+    good = np.isfinite(y)
+    if good.sum() == 0:
+        return y
+    if good.sum() == 1:
+        return np.full_like(y, y[good][0], dtype=float)
+    x = np.arange(y.size)
+    return np.interp(x, x[good], y[good])
+
+
+def detect_anomalies(wl, fl, params=None):
+    """
+    Lightweight astronomy-oriented anomaly detection.
+
+    Returns a list of dicts with schema:
+    type, wl, index, value, score, prominence, width, method
+    """
+    p = {
+        "clip_sigma": 3.0,
+        "clip_iters": 5,
+        "continuum_window": 101,
+        "continuum_poly": 3,
+        "mad_sigma": 5.0,
+        "prominence_sigma": 4.0,
+        "min_peak_distance": 5,
+        "use_specutils": False,
+        "specutils_noise_factor": 3.0,
+    }
+    if params:
+        p.update(params)
+
+    wl = np.asarray(wl, dtype=float)
+    fl = np.asarray(fl, dtype=float)
+
+    finite = np.isfinite(wl) & np.isfinite(fl)
+    if finite.sum() < 10:
+        return []
+
+    wl = wl[finite]
+    fl = fl[finite]
+
+    clipped = sigma_clip(
+        fl,
+        sigma=float(p["clip_sigma"]),
+        maxiters=int(p["clip_iters"]),
+        cenfunc="median",
+        masked=True,
+        copy=True,
+    )
+    clipped_flux = clipped.filled(np.nan) if hasattr(clipped, "filled") else np.asarray(clipped, dtype=float)
+    clipped_flux = _interp_nans(clipped_flux)
+
+    cont = smooth_flux(
+        clipped_flux.copy(),
+        window=int(p["continuum_window"]),
+        polyorder=int(p["continuum_poly"]),
+    )
+    cont = np.asarray(cont, dtype=float)
+    cont = _interp_nans(cont)
+
+    residual = fl - cont
+    residual = np.asarray(residual, dtype=float)
+    residual[~np.isfinite(residual)] = np.nan
+
+    finite_resid = residual[np.isfinite(residual)]
+    noise = mad_std(finite_resid, ignore_nan=True)
+    if not np.isfinite(noise) or noise <= 0:
+        noise = np.nanstd(finite_resid)
+    if not np.isfinite(noise) or noise <= 0:
+        noise = 1.0
+
+    anomalies = []
+
+    outlier_idx = np.where(np.abs(residual) >= float(p["mad_sigma"]) * noise)[0]
+    for i in outlier_idx:
+        anomalies.append({
+            "type": "sigma_outlier",
+            "wl": float(wl[i]),
+            "index": int(i),
+            "value": float(residual[i]),
+            "score": float(abs(residual[i]) / noise),
+            "prominence": np.nan,
+            "width": np.nan,
+            "method": "sigma_clip+mad",
+        })
+
+    peak_idx, peak_props = find_peaks(
+        residual,
+        prominence=float(p["prominence_sigma"]) * noise,
+        distance=max(1, int(p["min_peak_distance"])),
+    )
+    if len(peak_idx) > 0:
+        widths, _, _, _ = peak_widths(residual, peak_idx, rel_height=0.5)
+        for j, i in enumerate(peak_idx):
+            anomalies.append({
+                "type": "emission_peak",
+                "wl": float(wl[i]),
+                "index": int(i),
+                "value": float(residual[i]),
+                "score": float(abs(residual[i]) / noise),
+                "prominence": float(peak_props["prominences"][j]),
+                "width": float(widths[j]),
+                "method": "find_peaks+mad",
+            })
+
+    dip_idx, dip_props = find_peaks(
+        -residual,
+        prominence=float(p["prominence_sigma"]) * noise,
+        distance=max(1, int(p["min_peak_distance"])),
+    )
+    if len(dip_idx) > 0:
+        widths, _, _, _ = peak_widths(-residual, dip_idx, rel_height=0.5)
+        for j, i in enumerate(dip_idx):
+            anomalies.append({
+                "type": "absorption_dip",
+                "wl": float(wl[i]),
+                "index": int(i),
+                "value": float(residual[i]),
+                "score": float(abs(residual[i]) / noise),
+                "prominence": float(dip_props["prominences"][j]),
+                "width": float(widths[j]),
+                "method": "find_peaks+mad",
+            })
+
+    if (
+        p.get("use_specutils")
+        and Spectrum1D is not None
+        and u is not None
+        and StdDevUncertainty is not None
+        and find_lines_threshold is not None
+    ):
+        try:
+            spec = Spectrum1D(
+                spectral_axis=wl * u.AA,
+                flux=residual * u.one,
+                uncertainty=StdDevUncertainty(np.full_like(residual, noise) * u.one),
+            )
+            lines = find_lines_threshold(spec, noise_factor=float(p["specutils_noise_factor"]))
+            for row in lines:
+                try:
+                    idx = int(row["line_center_index"])
+                    if 0 <= idx < len(wl):
+                        anomalies.append({
+                            "type": str(row["line_type"]),
+                            "wl": float(wl[idx]),
+                            "index": idx,
+                            "value": float(residual[idx]),
+                            "score": float(abs(residual[idx]) / noise),
+                            "prominence": np.nan,
+                            "width": np.nan,
+                            "method": "specutils.find_lines_threshold",
+                        })
+                except Exception:
+                    pass
+        except Exception:
+            pass
+
+    seen = set()
+    cleaned = []
+    for a in anomalies:
+        key = (a.get("type"), a.get("index"))
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(a)
+
+    cleaned.sort(key=lambda x: (x.get("wl", np.nan), x.get("index", -1)))
+    return cleaned
 
 def calc_snr_on_band(ref_wl, ref_flux, band_range: Tuple[float, float]):
     start, end = band_range
@@ -1103,17 +1287,27 @@ with tabs[4]:
 # ---------------------------
 with tabs[5]:
     st.header("Anomaly Detection")
-    st.markdown("Lightweight detectors: z-score outliers, local dips, spikes. Tune thresholds in the sidebar.")
+    st.markdown(
+        "Robust spectral QC: sigma clipping, MAD-based outliers, continuum residuals, "
+        "peak prominence, and optional Specutils line finding."
+    )
 
     with st.sidebar.expander("Anomaly Detection Settings", expanded=False):
-        z_thresh = st.slider("Outlier z-threshold", 3, 10, 4)
-        dip_window = st.slider("Dip median window (px)", 11, 501, 101, step=2)
-        dip_depth = st.number_input("Dip minimum depth fraction", min_value=0.0001, max_value=1.0, value=0.01, step=0.001)
-        spike_window = st.slider("Spike window", 3, 101, 11, step=2)
-        spike_std = st.slider("Spike std-factor", 2, 20, 6)
+        clip_sigma = st.slider("Sigma-clip threshold (σ)", 2.0, 8.0, 3.0, 0.5)
+        clip_iters = st.slider("Sigma-clip iterations", 1, 10, 5)
+
+        continuum_window = st.slider("Continuum window (px)", 11, 501, 101, step=2)
+        continuum_poly = st.slider("Continuum polynomial order", 1, 5, 3)
+
+        mad_sigma = st.slider("MAD outlier threshold (× MAD σ)", 2.0, 10.0, 5.0, 0.5)
+        prominence_sigma = st.slider("Peak prominence (× MAD σ)", 1.0, 12.0, 4.0, 0.5)
+        min_peak_distance = st.slider("Minimum peak spacing (px)", 1, 50, 5)
+
+        use_specutils = st.checkbox("Use Specutils line finder", value=False)
+        specutils_noise_factor = st.slider("Specutils noise factor", 1.0, 10.0, 3.0, 0.5)
 
     anomalies_all = []
-    expected_keys = ANOMALY_KEYS  # stable schema for anomaly outputs
+    expected_keys = ANOMALY_KEYS
 
     for res in results:
         if res.get("wl") is None or res.get("fl") is None:
@@ -1125,15 +1319,19 @@ with tabs[5]:
         y_label = res.get("y_label", "Flux")
 
         params = {
-            "z_thresh": z_thresh,
-            "dip_window": dip_window,
-            "dip_depth": dip_depth,
-            "spike_window": spike_window,
-            "spike_std": spike_std
+            "clip_sigma": clip_sigma,
+            "clip_iters": clip_iters,
+            "continuum_window": continuum_window,
+            "continuum_poly": continuum_poly,
+            "mad_sigma": mad_sigma,
+            "prominence_sigma": prominence_sigma,
+            "min_peak_distance": min_peak_distance,
+            "use_specutils": use_specutils,
+            "specutils_noise_factor": specutils_noise_factor,
         }
+
         anoms = detect_anomalies(wl, fl, params=params)
 
-        # Add file info to each anomaly
         for a in anoms:
             a["file"] = res.get("file")
             a["hdu_index"] = res.get("hdu_index")
@@ -1142,7 +1340,6 @@ with tabs[5]:
 
         st.subheader(f"{res['file']} (HDU {res.get('hdu_index')})")
 
-        # Plot spectrum with anomalies
         fig = plot_spectrum_interactive(
             wl,
             fl,
@@ -1151,17 +1348,19 @@ with tabs[5]:
             y_label=y_label
         )
         fig = annotate_plotly(fig, anoms)
-        st.plotly_chart(fig, use_container_width=True, key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot'))
+        st.plotly_chart(
+            fig,
+            use_container_width=True,
+            key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot')
+        )
 
-        # Normalize anomalies: ensure all expected keys exist
         normalized_anoms = [{k: a.get(k, np.nan) for k in expected_keys} for a in anoms]
 
         if normalized_anoms:
             df_anoms = pd.DataFrame(normalized_anoms)
-            st.table(df_anoms.head(200))
+            st.dataframe(df_anoms.head(200), use_container_width=True)
 
             if enable_downloads:
-                # JSON download
                 import json
                 dl_key_json = make_key(res['file'], res.get('hdu_index'), 'anoms_json')
                 st.download_button(
@@ -1172,7 +1371,6 @@ with tabs[5]:
                     key=dl_key_json
                 )
 
-                # CSV download
                 dl_key_csv = make_key(res['file'], res.get('hdu_index'), 'anoms_csv')
                 st.download_button(
                     f"Download anomalies CSV - {res['file']}",
@@ -1184,12 +1382,10 @@ with tabs[5]:
         else:
             st.write("No anomalies detected for this spectrum.")
 
-    # Summary of all anomalies
     st.markdown("### Summary")
     st.write(f"Total anomalies detected across all files: {len(anomalies_all)}")
 
     if anomalies_all and enable_downloads:
-        # Normalize all anomalies across all files
         normalized_all = [{k: a.get(k, np.nan) for k in expected_keys + ["file", "hdu_index"]} for a in anomalies_all]
         df_all = pd.DataFrame(normalized_all)
         dl_key_all = make_key('all', 'anomalies', 'csv')
