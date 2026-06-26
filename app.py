@@ -693,99 +693,26 @@ if mast_search_btn:
 # ---------------------------
 # Main UI area
 # ---------------------------
-st.markdown(
-    """
-    <style>
-        .af-hero {
-            padding: 1.2rem 1.25rem;
-            border: 1px solid rgba(120,120,120,0.18);
-            border-radius: 18px;
-            background: linear-gradient(135deg, rgba(10,18,35,0.98), rgba(20,34,58,0.96));
-            color: white;
-            margin-bottom: 0.9rem;
-        }
-        .af-hero h1 {
-            margin: 0;
-            font-size: 2rem;
-            line-height: 1.15;
-        }
-        .af-hero p {
-            margin: 0.45rem 0 0 0;
-            font-size: 0.98rem;
-            opacity: 0.9;
-        }
-        .af-pill {
-            display: inline-block;
-            padding: 0.28rem 0.7rem;
-            margin: 0.2rem 0.35rem 0.2rem 0;
-            border-radius: 999px;
-            background: rgba(255,255,255,0.08);
-            border: 1px solid rgba(255,255,255,0.14);
-            font-size: 0.82rem;
-        }
-        .af-panel {
-            padding: 0.95rem 1rem;
-            border: 1px solid rgba(120,120,120,0.18);
-            border-radius: 14px;
-            background: rgba(250,250,252,0.88);
-            margin-bottom: 0.9rem;
-        }
-        .af-panel h3 {
-            margin-top: 0;
-            margin-bottom: 0.5rem;
-        }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
+st.title("🔭 AstroFlow · FITS Processor")
+st.markdown("Upload FITS or CSV files (JWST/HST/TESS/generic)")
 
-st.markdown(
-    """
-    <div class="af-hero">
-        <h1>🔭 AstroFlow</h1>
-        <p>A lightweight FITS and CSV processor for spectra, images, MAST archive retrieval, and report generation.</p>
-        <div style="margin-top:0.8rem;">
-            <span class="af-pill">JWST</span>
-            <span class="af-pill">HST</span>
-            <span class="af-pill">TESS</span>
-            <span class="af-pill">Generic FITS</span>
-            <span class="af-pill">CSV Spectra</span>
-        </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
+uploaded = st.file_uploader(
+    "Upload one or more FITS/CSV files",
+    type=["fits", "csv"],
+    accept_multiple_files=True
 )
 
 mast_results = st.session_state.get("mast_results")
 mast_imported_results = st.session_state.get("mast_imported_results", [])
 
 if not uploaded and mast_results is None and len(mast_imported_results) == 0:
-    st.info("Upload FITS or CSV spectral files to start, or search the MAST archive from the sidebar.")
+    st.info("Upload FITS or CSV spectral files to start or search the MAST archive")
     st.stop()
-
-st.markdown(
-    """
-    <div class="af-panel">
-        <h3>Data import</h3>
-        <p style="margin:0;">
-            Supported: <b>FITS</b> spectra, <b>FITS</b> images, and <b>CSV</b> spectral tables.
-            Unsupported: calibration-only tables, non-science extensions, and files beyond the memory limits of the hosted deployment.
-        </p>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
 
 # --- Save uploaded files and process each (FITS or CSV) ---
 tmpdir = tempfile.mkdtemp()
 file_paths = []
 uploaded_results = []
-processing_summary = {
-    "processed": [],
-    "skipped": [],
-    "warnings": [],
-    "errors": [],
-}
 nfiles = len(uploaded) if uploaded else 0
 progress = st.progress(0) if uploaded else None
 status_text = st.empty() if uploaded else None
@@ -807,27 +734,23 @@ if uploaded:
         # File size guard for uploaded files too
         file_mb = os.path.getsize(dst) / (1024 * 1024)
         if file_mb > MAX_FILE_MB:
-            msg = (
+            st.warning(
                 f"**{fname}** is {file_mb:.0f} MB (>{MAX_FILE_MB} MB limit) — skipped. "
                 f"Consider pre-processing large files locally."
             )
-            st.warning(msg)
-            processing_summary["skipped"].append({"file": fname, "reason": "file too large", "mb": round(file_mb, 1)})
             continue
 
         lower = fname.lower()
-
         # CSV handling
         if lower.endswith(".csv"):
             try:
                 csv_outputs = ingest_csv_file(dst, filename=fname)
-                if not csv_outputs:
-                    processing_summary["warnings"].append({"file": fname, "reason": "CSV parsed but no usable spectra were found"})
                 for out in csv_outputs:
                     if out.get("wl") is not None:
                         out["wl"] = np.asarray(out["wl"], dtype=float)
                     if out.get("fl") is not None:
                         out["fl"] = np.asarray(out["fl"], dtype=float)
+                    # derive labels from orig_df if possible
                     if out.get("orig_df") is not None:
                         mapping = map_columns(out["orig_df"])
                         x_label = mapping.get("wavelength") or mapping.get("time") or mapping.get("x") or mapping.get("lat") or "X"
@@ -838,12 +761,8 @@ if uploaded:
                         out.setdefault("x_label", "Wavelength")
                         out.setdefault("y_label", "Flux")
                     uploaded_results.append(out)
-
-                if csv_outputs:
-                    processing_summary["processed"].append({"file": fname, "type": "CSV", "items": len(csv_outputs)})
             except Exception as e:
                 st.error(f"Failed to parse CSV {fname}: {e}")
-                processing_summary["errors"].append({"file": fname, "reason": str(e)})
             continue
 
         # FITS handling — open with fallback for scaled images
@@ -851,21 +770,16 @@ if uploaded:
             with open_fits_best_effort(dst) as (hdul, used_memmap):
                 found_any = False
                 unsupported_reasons = set()
-                n_supported_hdus = 0
-                n_skipped_hdus = 0
 
                 for idx, hdu in enumerate(hdul):
                     reason = fits_skip_reason(hdu)
                     if reason:
                         unsupported_reasons.add(reason)
-
                     wl, fl, labels = try_extract_spectrum(hdu)
                     if wl is None:
-                        n_skipped_hdus += 1
                         continue
-
                     found_any = True
-                    n_supported_hdus += 1
+                    err = None
                     uploaded_results.append({
                         "file": fname,
                         "path": dst,
@@ -873,32 +787,23 @@ if uploaded:
                         "header": dict(hdu.header) if hasattr(hdu, "header") else {},
                         "wl": np.array(wl, dtype=float),
                         "fl": np.array(fl, dtype=float),
-                        "err": None,
+                        "err": err,
                         "x_label": labels.get("x_label", "Wavelength"),
                         "y_label": labels.get("y_label", "Flux"),
                     })
 
                 if not found_any:
                     if unsupported_reasons:
-                        msg = (
+                        st.warning(
                             f"**{fname}** was skipped because it contains only unsupported HDU types: "
                             f"{', '.join(sorted(unsupported_reasons))}. "
                             f"AstroFlow in the hosted Streamlit build supports 1D spectra and 2D images only."
                         )
-                        st.warning(msg)
-                        processing_summary["skipped"].append({
-                            "file": fname,
-                            "reason": "unsupported HDU types",
-                            "details": ", ".join(sorted(unsupported_reasons)),
-                            "skipped_hdus": n_skipped_hdus,
-                        })
                     else:
-                        msg = (
+                        st.warning(
                             f"**{fname}** did not contain an extractable 1D spectrum. "
                             "It may be an image-only file, a metadata-only product, or a format AstroFlow does not treat as a spectrum."
                         )
-                        st.warning(msg)
-                        processing_summary["warnings"].append({"file": fname, "reason": "no extractable 1D spectrum"})
                         uploaded_results.append({
                             "file": fname,
                             "path": dst,
@@ -910,17 +815,8 @@ if uploaded:
                             "x_label": "Wavelength",
                             "y_label": "Flux",
                         })
-                else:
-                    processing_summary["processed"].append({
-                        "file": fname,
-                        "type": "FITS",
-                        "supported_hdus": n_supported_hdus,
-                        "skipped_hdus": n_skipped_hdus,
-                        "memmap": bool(used_memmap),
-                    })
         except Exception as e:
             st.warning(f"Could not open **{fname}**: {e}")
-            processing_summary["errors"].append({"file": fname, "reason": str(e)})
 
     progress.progress(100, text="✅ All files processed.")
     if status_text:
@@ -929,41 +825,25 @@ if uploaded:
 mast_imported_results = st.session_state.get("mast_imported_results", [])
 results = uploaded_results + mast_imported_results
 
-# Dashboard summary cards
-num_spectra = sum(1 for r in results if r.get("wl") is not None and r.get("fl") is not None)
-num_images = sum(1 for r in results if r.get("path"))
-num_skipped = len(processing_summary["skipped"])
-num_warnings = len(processing_summary["warnings"])
-num_errors = len(processing_summary["errors"])
-
-st.markdown("### Session summary")
-s1, s2, s3, s4, s5 = st.columns(5)
-s1.metric("Files", len(uploaded) if uploaded else 0)
-s2.metric("Spectra", num_spectra)
-s3.metric("Images", num_images)
-s4.metric("Skipped", num_skipped)
-s5.metric("Warnings", num_warnings + num_errors)
-
-with st.expander("Processing details", expanded=False):
-    st.write("Processed items")
-    st.json(processing_summary["processed"] if processing_summary["processed"] else [])
-    st.write("Skipped items")
-    st.json(processing_summary["skipped"] if processing_summary["skipped"] else [])
-    if processing_summary["warnings"]:
-        st.write("Warnings")
-        st.json(processing_summary["warnings"])
-    if processing_summary["errors"]:
-        st.write("Errors")
-        st.json(processing_summary["errors"])
-
+#=============================================
 st.sidebar.markdown("---")
 with st.sidebar.expander("Session Summary", expanded=False):
+    num_spectra = sum(
+        1
+        for r in results
+        if r.get("wl") is not None
+    )
+
+    num_files_with_path = sum(
+        1
+        for r in results
+        if r.get("path")
+    )
+
     st.metric("Spectra", num_spectra)
     st.metric("Files", len(results))
-    st.metric("Images", num_images)
-    st.metric("Skipped HDUs", num_skipped)
-    st.metric("Warnings", num_warnings)
-    st.metric("Errors", num_errors)
+    st.metric("MAST Imports", len(mast_imported_results))
+#====================================================
 
 if len(results) == 0 and mast_results is None:
     st.error("No spectra could be extracted from uploaded files. You may upload pre-processed wavelength+flux CSVs.")
@@ -1531,7 +1411,6 @@ with tabs[4]:
                 )
         else:
             st.error("PDF report was not generated.")
-
 
 # ---------------------------
 # Anomaly Detection tab
