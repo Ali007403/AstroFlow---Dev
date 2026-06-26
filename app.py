@@ -11,6 +11,8 @@ from scipy.signal import savgol_filter
 import pandas as pd
 import tempfile, os, io, time, re, hashlib
 from typing import Tuple
+from contextlib import contextmanager
+from concurrent.futures import ThreadPoolExecutor, TimeoutError as FuturesTimeoutError
 import plotly.graph_objects as go
 import matplotlib.pyplot as plt
 from astroquery.mast import Observations
@@ -55,58 +57,108 @@ def make_key(*parts):
 WL_COLS = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WLEN', 'LAMBDA_MICRON', 'LAMBDA_UM', 'WAVELENGTH_MICRON']
 FLUX_COLS = ['FLUX', 'FLUX_DENSITY', 'SPECTRUM', 'INTENSITY', 'FLUX_1', 'FLUX_0']
 
+NON_SCIENCE_EXTNAMES = {
+    # Data quality / flag arrays
+    'DQ', 'DQ1', 'DQ2', 'DQ3',
+    # Error / uncertainty arrays
+    'ERR', 'ERR1', 'ERR2', 'SIGMA', 'NOISE', 'STDEV',
+    # Variance arrays (JWST pipeline products)
+    'VAR_POISSON', 'VAR_RNOISE', 'VAR_FLAT', 'VAR_RAMP',
+    # Weight / exposure maps
+    'WHT', 'WEIGHT', 'EXP', 'EXPTIME', 'CTX',
+    # Background arrays
+    'BKG', 'BACKGROUND',
+    # Contamination / model
+    'CONTAM', 'MODEL',
+    # Kernel / PSF
+    'KERNEL', 'PSF',
+    # Sample / groupdq (JWST raw ramp data)
+    'GROUPDQ', 'PIXELDQ',
+    # Wavelength solution / reference arrays stored as calibration tables
+    'WAVELENGTH', 'WCSCORR', 'HDRTAB', 'ASDF',
+    # HST-specific calibration extensions
+    'D2IMARR', 'WCSDVARR', 'SIPWCS',
+}
+
+SUPPORTED_SCIENCE_TABLE_MIN_ROWS = 5
+MAX_MAST_RESULTS = 200
+MAST_TIMEOUT_S = 25
+ANOMALY_KEYS = ["type", "wl", "index", "value"]
+
 def safe_names(arr):
     try:
         return list(arr.names)
     except Exception:
         return []
 
+
+@contextmanager
+def open_fits_best_effort(file_path):
+    """
+    Open FITS with a memmap fallback for scaled images.
+    Some files with BZERO/BSCALE/BLANK keywords cannot be memory-mapped
+    and must be reopened with memmap=False.
+    """
+    try:
+        with fits.open(file_path, memmap=True) as hdul:
+            yield hdul, True
+            return
+    except Exception as first_exc:
+        msg = str(first_exc)
+        if (
+            "BZERO/BSCALE/BLANK" in msg
+            or "Cannot load a memory-mapped image" in msg
+            or "Set memmap=False" in msg
+        ):
+            with fits.open(file_path, memmap=False) as hdul:
+                yield hdul, False
+                return
+        raise first_exc
+
+
+def fits_skip_reason(hdu):
+    """Return a human-readable skip reason for unsupported HDUs."""
+    try:
+        extname = str(hdu.header.get("EXTNAME", "")).strip().upper()
+        if extname in NON_SCIENCE_EXTNAMES:
+            return f"non-science extension ({extname})"
+        naxis = hdu.header.get("NAXIS", None)
+        if naxis is not None:
+            try:
+                naxis = int(naxis)
+            except Exception:
+                naxis = None
+        if naxis is not None and naxis > 2:
+            return f"unsupported dimensionality (NAXIS={naxis})"
+    except Exception:
+        pass
+    return None
+
 def try_extract_spectrum(hdu):
     """
     Returns: (wl_array, fl_array, labels_dict)
     labels_dict contains keys: x_label, y_label
 
-    Skips HDUs that are known non-science data products (DQ flags,
-    error arrays, weight maps, calibration tables) by checking EXTNAME
-    before touching the data. This prevents bitmask/flag arrays from
-    being plotted as spectra.
+    Only extracts true 1D spectra or table-based wavelength/flux pairs.
+    2D image HDUs are intentionally NOT collapsed into spectra, because
+    that leads to scientific mislabeling (e.g. DQ arrays, detector images,
+    or generic imaging extensions being plotted as if they were spectra).
     """
     default_labels = {"x_label": "Wavelength", "y_label": "Flux"}
 
-    # --- EXTNAME filter: skip known non-science HDU types ---
-    # These are standard FITS extension names for calibration, quality,
-    # and error data that should never be treated as spectra.
-    NON_SCIENCE_EXTNAMES = {
-        # Data quality / flag arrays
-        'DQ', 'DQ1', 'DQ2', 'DQ3',
-        # Error / uncertainty arrays
-        'ERR', 'ERR1', 'ERR2', 'SIGMA', 'NOISE', 'STDEV',
-        # Variance arrays (JWST pipeline products)
-        'VAR_POISSON', 'VAR_RNOISE', 'VAR_FLAT', 'VAR_RAMP',
-        # Weight / exposure maps
-        'WHT', 'WEIGHT', 'EXP', 'EXPTIME', 'CTX',
-        # Background arrays
-        'BKG', 'BACKGROUND',
-        # Contamination / model
-        'CONTAM', 'MODEL',
-        # Kernel / PSF
-        'KERNEL', 'PSF',
-        # Sample / groupdq (JWST raw ramp data)
-        'GROUPDQ', 'PIXELDQ',
-        # Wavelength solution / reference arrays stored as calibration tables
-        'WAVELENGTH', 'WCSCORR', 'HDRTAB', 'ASDF',
-        # HST-specific calibration extensions
-        'D2IMARR', 'WCSDVARR', 'SIPWCS',
-    }
-
+    # Skip known non-science HDU types before touching the data.
     try:
-        extname = str(hdu.header.get('EXTNAME', '')).strip().upper()
+        extname = str(hdu.header.get("EXTNAME", "")).strip().upper()
         if extname in NON_SCIENCE_EXTNAMES:
             return None, None, default_labels
     except Exception:
         pass
 
-    data = hdu.data
+    try:
+        data = hdu.data
+    except Exception:
+        return None, None, default_labels
+
     if data is None:
         return None, None, default_labels
 
@@ -126,16 +178,12 @@ def try_extract_spectrum(hdu):
                     labels = {"x_label": wl_col, "y_label": fl_col}
                     return wl[mask], fl[mask], labels
 
-            # Fallback: first two numeric columns
-            # Guard: skip tables whose first numeric column looks like a
-            # metadata reference table (e.g. EXTVER/CRVAL1 diagonal lines).
-            # A real spectrum has >> 10 rows; metadata tables rarely do.
+            # Fallback: first two numeric columns from a sufficiently large table.
             names = safe_names(data)
             nums = [n for n in names if np.issubdtype(data[n].dtype, np.number)]
             if len(nums) >= 2:
                 n_rows = len(data)
-                if n_rows < 5:
-                    # Too few rows to be a real spectrum — skip silently
+                if n_rows < SUPPORTED_SCIENCE_TABLE_MIN_ROWS:
                     return None, None, default_labels
                 wl = np.array(data[nums[0]]).astype(float).flatten()
                 fl = np.array(data[nums[1]]).astype(float).flatten()
@@ -146,7 +194,9 @@ def try_extract_spectrum(hdu):
     except Exception:
         pass
 
-    # Image-like HDU: collapse to 1D or return pixel index
+    # Only 1D arrays are treated as spectra. 2D arrays are left for the
+    # Images tab, because collapsing them here can turn detector images,
+    # DQ planes, and calibration arrays into fake "spectra".
     try:
         arr = np.array(data)
         if arr.ndim == 1:
@@ -154,17 +204,6 @@ def try_extract_spectrum(hdu):
             fl = arr.astype(float)
             mask = np.isfinite(fl)
             return wl[mask], fl[mask], {"x_label": "Index", "y_label": "Value"}
-        elif arr.ndim == 2:
-            # Guard against empty-slice RuntimeWarning on zero-row 2D HDUs
-            if arr.shape[0] == 0 or arr.shape[1] == 0:
-                return None, None, default_labels
-            with np.errstate(all="ignore"):
-                fl = np.nanmean(arr, axis=0)
-            if not np.any(np.isfinite(fl)):
-                return None, None, default_labels
-            wl = np.arange(fl.size)
-            mask = np.isfinite(fl)
-            return wl[mask], fl[mask], {"x_label": "Pixel", "y_label": "Mean(pixel rows)"}
     except Exception:
         pass
 
@@ -255,27 +294,47 @@ def calc_snr_on_band(ref_wl, ref_flux, band_range: Tuple[float, float]):
 # ==========================================================
 # MAST ARCHIVE INTEGRATION
 # ==========================================================
-@st.cache_data(ttl=3600)
-def mast_search_target(target_name, mission=None, radius="0.05 deg"):
-    """
-    Search MAST archive for a target.
-    """
+def _mast_query_object(target_name, mission=None, radius="0.05 deg", max_results=MAX_MAST_RESULTS):
+    """Internal helper for MAST search."""
     try:
         obs = Observations.query_object(
             target_name,
-            radius=radius
+            radius=radius,
+            pagesize=max_results,
+        )
+    except TypeError:
+        obs = Observations.query_object(
+            target_name,
+            radius=radius,
         )
 
-        if mission and mission != "All":
-            obs = obs[
-                obs["obs_collection"] == mission
-            ]
+    if mission and mission != "All" and obs is not None and len(obs) > 0:
+        obs = obs[obs["obs_collection"] == mission]
 
-        return obs
+    if obs is not None and len(obs) > max_results:
+        obs = obs[:max_results]
 
-    except Exception as e:
-        st.error(f"MAST search failed: {e}")
-        return None
+    return obs
+
+
+def mast_search_target(target_name, mission=None, radius="0.05 deg"):
+    """
+    Search MAST archive for a target with a timeout so the UI does not
+    spin forever on slow or overloaded archive responses.
+    """
+    with ThreadPoolExecutor(max_workers=1) as executor:
+        future = executor.submit(_mast_query_object, target_name, mission, radius)
+        try:
+            return future.result(timeout=MAST_TIMEOUT_S)
+        except FuturesTimeoutError:
+            st.warning(
+                f"MAST search timed out after {MAST_TIMEOUT_S} seconds. "
+                "Try a more specific target name, a smaller radius, or retry later."
+            )
+            return None
+        except Exception as e:
+            st.error(f"MAST search failed: {e}")
+            return None
 
 def mast_download_products(observation_row):
     """
@@ -329,7 +388,7 @@ def mast_import_fits(file_path):
     """
     Import downloaded FITS into AstroFlow format.
     Skips files larger than MAX_FILE_MB to prevent memory crashes.
-    Uses memmap=True for efficient lazy loading of large FITS.
+    Opens with a memmap fallback for scaled images.
     """
     imported_results = []
 
@@ -348,8 +407,12 @@ def mast_import_fits(file_path):
         return imported_results
 
     try:
-        with fits.open(file_path, memmap=True) as hdul:
+        with open_fits_best_effort(file_path) as (hdul, used_memmap):
             for idx, hdu in enumerate(hdul):
+                # Avoid processing known non-science HDUs.
+                if fits_skip_reason(hdu) and hdu.header.get("NAXIS", 0) and int(hdu.header.get("NAXIS", 0)) > 2:
+                    continue
+
                 wl, fl, labels = try_extract_spectrum(hdu)
 
                 if wl is None:
@@ -363,18 +426,20 @@ def mast_import_fits(file_path):
                     "wl": np.array(wl, dtype=float),
                     "fl": np.array(fl, dtype=float),
                     "err": None,
-                    "x_label": labels.get(
-                        "x_label",
-                        "Wavelength"
-                    ),
-                    "y_label": labels.get(
-                        "y_label",
-                        "Flux"
-                    ),
+                    "x_label": labels.get("x_label", "Wavelength"),
+                    "y_label": labels.get("y_label", "Flux"),
                 })
 
+        if len(imported_results) == 0:
+            st.warning(
+                f"**{os.path.basename(file_path)}** did not contain an extractable 1D spectrum. "
+                "This file may be image-only, metadata-only, or contain unsupported HDU types."
+            )
+
     except Exception as e:
-        st.error(f"Failed to import FITS: {e}")
+        st.warning(
+            f"Could not import **{os.path.basename(file_path)}**: {e}"
+        )
 
     return imported_results
 
@@ -411,6 +476,7 @@ with st.sidebar.expander("MAST Archive", expanded=True):
     )
 
     st.caption(f"Downloads limited to {MAX_PRODUCTS} products · files >{MAX_FILE_MB} MB skipped")
+    st.caption("MAST searches can be slow on broad targets. Narrow the target name when possible.")
 
     mast_search_btn = st.button(
         "Search MAST"
@@ -515,11 +581,16 @@ if uploaded:
                 st.error(f"Failed to parse CSV {fname}: {e}")
             continue
 
-        # FITS handling — memmap=True for efficient large-file loading
+        # FITS handling — open with fallback for scaled images
         try:
-            with fits.open(dst, memmap=True) as hdul:
+            with open_fits_best_effort(dst) as (hdul, used_memmap):
                 found_any = False
+                unsupported_reasons = set()
+
                 for idx, hdu in enumerate(hdul):
+                    reason = fits_skip_reason(hdu)
+                    if reason:
+                        unsupported_reasons.add(reason)
                     wl, fl, labels = try_extract_spectrum(hdu)
                     if wl is None:
                         continue
@@ -536,20 +607,32 @@ if uploaded:
                         "x_label": labels.get("x_label", "Wavelength"),
                         "y_label": labels.get("y_label", "Flux"),
                     })
+
                 if not found_any:
-                    uploaded_results.append({
-                        "file": fname,
-                        "path": dst,
-                        "hdu_index": None,
-                        "header": {},
-                        "wl": None,
-                        "fl": None,
-                        "err": None,
-                        "x_label": "Wavelength",
-                        "y_label": "Flux",
-                    })
+                    if unsupported_reasons:
+                        st.warning(
+                            f"**{fname}** was skipped because it contains only unsupported HDU types: "
+                            f"{', '.join(sorted(unsupported_reasons))}. "
+                            f"AstroFlow in the hosted Streamlit build supports 1D spectra and 2D images only."
+                        )
+                    else:
+                        st.warning(
+                            f"**{fname}** did not contain an extractable 1D spectrum. "
+                            "It may be an image-only file, a metadata-only product, or a format AstroFlow does not treat as a spectrum."
+                        )
+                        uploaded_results.append({
+                            "file": fname,
+                            "path": dst,
+                            "hdu_index": None,
+                            "header": {},
+                            "wl": None,
+                            "fl": None,
+                            "err": None,
+                            "x_label": "Wavelength",
+                            "y_label": "Flux",
+                        })
         except Exception as e:
-            st.error(f"Failed to open {fname}: {e}")
+            st.warning(f"Could not open **{fname}**: {e}")
 
     progress.progress(100, text="✅ All files processed.")
     if status_text:
@@ -739,7 +822,7 @@ with tabs[1]:
                 x_label=x_label,
                 y_label=y_label
             )
-            st.plotly_chart(fig, width='stretch', key=unique_key)
+            st.plotly_chart(fig, use_container_width=True, key=unique_key)
 
             # Downloads
             if enable_downloads:
@@ -769,7 +852,7 @@ with tabs[2]:
         else:
             st.write("No 1D data for this file.")
             continue
-        st.dataframe(df.head(500), use_container_width='stretch')
+        st.dataframe(df.head(500), use_container_width=True)
         if enable_downloads:
             dl_key = make_key(r.get('file'), r.get('hdu_index'), 'download', 'table_csv')
             st.download_button(f"Download CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv', key=dl_key)
@@ -779,7 +862,7 @@ with tabs[2]:
 with tabs[3]:
     st.header("FITS Images")
     found_image = False
-    seen_files = set()
+    seen_img_combos = set()
     image_render_count = 0
 
     # Per-image display controls
@@ -813,17 +896,18 @@ with tabs[3]:
         if not file_path:
             continue
 
-        if file_path in seen_files:
-            continue
-
-        seen_files.add(file_path)
-
         try:
-            with fits.open(file_path, memmap=True) as hdul:
+            with open_fits_best_effort(file_path) as (hdul, used_memmap):
                 for idx, hdu in enumerate(hdul):
                     if image_render_count >= MAX_IMAGES:
                         break
+
+                    combo = (file_path, idx)
+                    if combo in seen_img_combos:
+                        continue
+
                     if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
+                        seen_img_combos.add(combo)
                         found_image = True
                         image_render_count += 1
                         st.subheader(f"{r['file']} (HDU {idx}) — Image ({hdu.data.shape[0]}×{hdu.data.shape[1]} px)")
@@ -948,7 +1032,7 @@ with tabs[4]:
             if not r.get("path"):
                 continue
             try:
-                with fits.open(r["path"], memmap=True) as hdul:
+                with open_fits_best_effort(r["path"]) as (hdul, used_memmap):
                     for idx, hdu in enumerate(hdul):
                         if img_count_rpt >= MAX_IMAGES:
                             break
@@ -1029,7 +1113,7 @@ with tabs[5]:
         spike_std = st.slider("Spike std-factor", 2, 20, 6)
 
     anomalies_all = []
-    expected_keys = ["type", "wl", "index", "value"]  # defined here — used both inside loop and in summary
+    expected_keys = ANOMALY_KEYS  # stable schema for anomaly outputs
 
     for res in results:
         if res.get("wl") is None or res.get("fl") is None:
@@ -1067,7 +1151,7 @@ with tabs[5]:
             y_label=y_label
         )
         fig = annotate_plotly(fig, anoms)
-        st.plotly_chart(fig, width='stretch', key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot'))
+        st.plotly_chart(fig, use_container_width=True, key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot'))
 
         # Normalize anomalies: ensure all expected keys exist
         normalized_anoms = [{k: a.get(k, np.nan) for k in expected_keys} for a in anoms]
