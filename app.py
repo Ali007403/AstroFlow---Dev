@@ -693,26 +693,99 @@ if mast_search_btn:
 # ---------------------------
 # Main UI area
 # ---------------------------
-st.title("🔭 AstroFlow · FITS Processor")
-st.markdown("Upload FITS or CSV files (JWST/HST/TESS/generic)")
+st.markdown(
+    """
+    <style>
+        .af-hero {
+            padding: 1.2rem 1.25rem;
+            border: 1px solid rgba(120,120,120,0.18);
+            border-radius: 18px;
+            background: linear-gradient(135deg, rgba(10,18,35,0.98), rgba(20,34,58,0.96));
+            color: white;
+            margin-bottom: 0.9rem;
+        }
+        .af-hero h1 {
+            margin: 0;
+            font-size: 2rem;
+            line-height: 1.15;
+        }
+        .af-hero p {
+            margin: 0.45rem 0 0 0;
+            font-size: 0.98rem;
+            opacity: 0.9;
+        }
+        .af-pill {
+            display: inline-block;
+            padding: 0.28rem 0.7rem;
+            margin: 0.2rem 0.35rem 0.2rem 0;
+            border-radius: 999px;
+            background: rgba(255,255,255,0.08);
+            border: 1px solid rgba(255,255,255,0.14);
+            font-size: 0.82rem;
+        }
+        .af-panel {
+            padding: 0.95rem 1rem;
+            border: 1px solid rgba(120,120,120,0.18);
+            border-radius: 14px;
+            background: rgba(250,250,252,0.88);
+            margin-bottom: 0.9rem;
+        }
+        .af-panel h3 {
+            margin-top: 0;
+            margin-bottom: 0.5rem;
+        }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
 
-uploaded = st.file_uploader(
-    "Upload one or more FITS/CSV files",
-    type=["fits", "csv"],
-    accept_multiple_files=True
+st.markdown(
+    """
+    <div class="af-hero">
+        <h1>🔭 AstroFlow</h1>
+        <p>A lightweight FITS and CSV processor for spectra, images, MAST archive retrieval, and report generation.</p>
+        <div style="margin-top:0.8rem;">
+            <span class="af-pill">JWST</span>
+            <span class="af-pill">HST</span>
+            <span class="af-pill">TESS</span>
+            <span class="af-pill">Generic FITS</span>
+            <span class="af-pill">CSV Spectra</span>
+        </div>
+    </div>
+    """,
+    unsafe_allow_html=True,
 )
 
 mast_results = st.session_state.get("mast_results")
 mast_imported_results = st.session_state.get("mast_imported_results", [])
 
 if not uploaded and mast_results is None and len(mast_imported_results) == 0:
-    st.info("Upload FITS or CSV spectral files to start or search the MAST archive")
+    st.info("Upload FITS or CSV spectral files to start, or search the MAST archive from the sidebar.")
     st.stop()
+
+st.markdown(
+    """
+    <div class="af-panel">
+        <h3>Data import</h3>
+        <p style="margin:0;">
+            Supported: <b>FITS</b> spectra, <b>FITS</b> images, and <b>CSV</b> spectral tables.
+            Unsupported: calibration-only tables, non-science extensions, and files beyond the memory limits of the hosted deployment.
+        </p>
+    </div>
+    """,
+    unsafe_allow_html=True,
+)
 
 # --- Save uploaded files and process each (FITS or CSV) ---
 tmpdir = tempfile.mkdtemp()
 file_paths = []
 uploaded_results = []
+processing_summary = {
+    "processed": [],
+    "skipped": [],
+    "warnings": [],
+    "errors": [],
+}
 nfiles = len(uploaded) if uploaded else 0
 progress = st.progress(0) if uploaded else None
 status_text = st.empty() if uploaded else None
@@ -734,23 +807,27 @@ if uploaded:
         # File size guard for uploaded files too
         file_mb = os.path.getsize(dst) / (1024 * 1024)
         if file_mb > MAX_FILE_MB:
-            st.warning(
+            msg = (
                 f"**{fname}** is {file_mb:.0f} MB (>{MAX_FILE_MB} MB limit) — skipped. "
                 f"Consider pre-processing large files locally."
             )
+            st.warning(msg)
+            processing_summary["skipped"].append({"file": fname, "reason": "file too large", "mb": round(file_mb, 1)})
             continue
 
         lower = fname.lower()
+
         # CSV handling
         if lower.endswith(".csv"):
             try:
                 csv_outputs = ingest_csv_file(dst, filename=fname)
+                if not csv_outputs:
+                    processing_summary["warnings"].append({"file": fname, "reason": "CSV parsed but no usable spectra were found"})
                 for out in csv_outputs:
                     if out.get("wl") is not None:
                         out["wl"] = np.asarray(out["wl"], dtype=float)
                     if out.get("fl") is not None:
                         out["fl"] = np.asarray(out["fl"], dtype=float)
-                    # derive labels from orig_df if possible
                     if out.get("orig_df") is not None:
                         mapping = map_columns(out["orig_df"])
                         x_label = mapping.get("wavelength") or mapping.get("time") or mapping.get("x") or mapping.get("lat") or "X"
@@ -761,8 +838,12 @@ if uploaded:
                         out.setdefault("x_label", "Wavelength")
                         out.setdefault("y_label", "Flux")
                     uploaded_results.append(out)
+
+                if csv_outputs:
+                    processing_summary["processed"].append({"file": fname, "type": "CSV", "items": len(csv_outputs)})
             except Exception as e:
                 st.error(f"Failed to parse CSV {fname}: {e}")
+                processing_summary["errors"].append({"file": fname, "reason": str(e)})
             continue
 
         # FITS handling — open with fallback for scaled images
@@ -770,16 +851,21 @@ if uploaded:
             with open_fits_best_effort(dst) as (hdul, used_memmap):
                 found_any = False
                 unsupported_reasons = set()
+                n_supported_hdus = 0
+                n_skipped_hdus = 0
 
                 for idx, hdu in enumerate(hdul):
                     reason = fits_skip_reason(hdu)
                     if reason:
                         unsupported_reasons.add(reason)
+
                     wl, fl, labels = try_extract_spectrum(hdu)
                     if wl is None:
+                        n_skipped_hdus += 1
                         continue
+
                     found_any = True
-                    err = None
+                    n_supported_hdus += 1
                     uploaded_results.append({
                         "file": fname,
                         "path": dst,
@@ -787,23 +873,32 @@ if uploaded:
                         "header": dict(hdu.header) if hasattr(hdu, "header") else {},
                         "wl": np.array(wl, dtype=float),
                         "fl": np.array(fl, dtype=float),
-                        "err": err,
+                        "err": None,
                         "x_label": labels.get("x_label", "Wavelength"),
                         "y_label": labels.get("y_label", "Flux"),
                     })
 
                 if not found_any:
                     if unsupported_reasons:
-                        st.warning(
+                        msg = (
                             f"**{fname}** was skipped because it contains only unsupported HDU types: "
                             f"{', '.join(sorted(unsupported_reasons))}. "
                             f"AstroFlow in the hosted Streamlit build supports 1D spectra and 2D images only."
                         )
+                        st.warning(msg)
+                        processing_summary["skipped"].append({
+                            "file": fname,
+                            "reason": "unsupported HDU types",
+                            "details": ", ".join(sorted(unsupported_reasons)),
+                            "skipped_hdus": n_skipped_hdus,
+                        })
                     else:
-                        st.warning(
+                        msg = (
                             f"**{fname}** did not contain an extractable 1D spectrum. "
                             "It may be an image-only file, a metadata-only product, or a format AstroFlow does not treat as a spectrum."
                         )
+                        st.warning(msg)
+                        processing_summary["warnings"].append({"file": fname, "reason": "no extractable 1D spectrum"})
                         uploaded_results.append({
                             "file": fname,
                             "path": dst,
@@ -815,8 +910,17 @@ if uploaded:
                             "x_label": "Wavelength",
                             "y_label": "Flux",
                         })
+                else:
+                    processing_summary["processed"].append({
+                        "file": fname,
+                        "type": "FITS",
+                        "supported_hdus": n_supported_hdus,
+                        "skipped_hdus": n_skipped_hdus,
+                        "memmap": bool(used_memmap),
+                    })
         except Exception as e:
             st.warning(f"Could not open **{fname}**: {e}")
+            processing_summary["errors"].append({"file": fname, "reason": str(e)})
 
     progress.progress(100, text="✅ All files processed.")
     if status_text:
@@ -825,25 +929,41 @@ if uploaded:
 mast_imported_results = st.session_state.get("mast_imported_results", [])
 results = uploaded_results + mast_imported_results
 
-#=============================================
+# Dashboard summary cards
+num_spectra = sum(1 for r in results if r.get("wl") is not None and r.get("fl") is not None)
+num_images = sum(1 for r in results if r.get("path"))
+num_skipped = len(processing_summary["skipped"])
+num_warnings = len(processing_summary["warnings"])
+num_errors = len(processing_summary["errors"])
+
+st.markdown("### Session summary")
+s1, s2, s3, s4, s5 = st.columns(5)
+s1.metric("Files", len(uploaded) if uploaded else 0)
+s2.metric("Spectra", num_spectra)
+s3.metric("Images", num_images)
+s4.metric("Skipped", num_skipped)
+s5.metric("Warnings", num_warnings + num_errors)
+
+with st.expander("Processing details", expanded=False):
+    st.write("Processed items")
+    st.json(processing_summary["processed"] if processing_summary["processed"] else [])
+    st.write("Skipped items")
+    st.json(processing_summary["skipped"] if processing_summary["skipped"] else [])
+    if processing_summary["warnings"]:
+        st.write("Warnings")
+        st.json(processing_summary["warnings"])
+    if processing_summary["errors"]:
+        st.write("Errors")
+        st.json(processing_summary["errors"])
+
 st.sidebar.markdown("---")
 with st.sidebar.expander("Session Summary", expanded=False):
-    num_spectra = sum(
-        1
-        for r in results
-        if r.get("wl") is not None
-    )
-
-    num_files_with_path = sum(
-        1
-        for r in results
-        if r.get("path")
-    )
-
     st.metric("Spectra", num_spectra)
     st.metric("Files", len(results))
-    st.metric("MAST Imports", len(mast_imported_results))
-#====================================================
+    st.metric("Images", num_images)
+    st.metric("Skipped HDUs", num_skipped)
+    st.metric("Warnings", num_warnings)
+    st.metric("Errors", num_errors)
 
 if len(results) == 0 and mast_results is None:
     st.error("No spectra could be extracted from uploaded files. You may upload pre-processed wavelength+flux CSVs.")
@@ -1140,9 +1260,8 @@ with tabs[3]:
 # Reports tab
 with tabs[4]:
     st.header("Generate PDF Report")
-    st.markdown("Compile spectra plots and FITS images into a single PDF.")
+    st.markdown("Compile spectra plots and FITS images into a single PDF with a cover page and summary pages.")
 
-    # Report metadata inputs
     rpt_col1, rpt_col2 = st.columns(2)
     with rpt_col1:
         rpt_target = st.text_input("Target / Object name", value=mast_target if mast_target else "Unknown Target")
@@ -1151,21 +1270,155 @@ with tabs[4]:
         rpt_instrument = st.text_input("Instrument / Mission", value="")
         rpt_notes = st.text_area("Report notes (optional)", value="", height=68)
 
+    st.markdown("#### Report contents")
+    st.caption("The report will include a cover page, a summary page, a methods page, then the selected spectra and images.")
+
     if st.button("Generate Report"):
         tmp_pdf = os.path.join(tempfile.gettempdir(), f"astroflow_report_{int(time.time())}.pdf")
         plots = []
         images = []
-        # tables = []  # Removed - no CSV tables in PDF
 
         spec_results_for_report = [r for r in results if r.get("wl") is not None and r.get("fl") is not None]
+        report_metrics = {
+            "n_files": len(results),
+            "n_spectra": len(spec_results_for_report),
+            "n_images": sum(1 for r in results if r.get("path")),
+            "n_skipped": len(processing_summary["skipped"]) if "processing_summary" in locals() else 0,
+            "n_warnings": len(processing_summary["warnings"]) if "processing_summary" in locals() else 0,
+            "n_errors": len(processing_summary["errors"]) if "processing_summary" in locals() else 0,
+        }
 
         report_progress = st.progress(0, text="Building report…")
-        n_report_steps = max(len(spec_results_for_report) + 1, 1)
+        n_report_steps = max(len(spec_results_for_report) + 3, 1)
+
+        report_dir = tempfile.mkdtemp()
+
+        def _save_text_page(path, title, subtitle_lines, body_lines):
+            fig, ax = plt.subplots(figsize=(8.27, 11.69), dpi=200)
+            ax.axis("off")
+
+            y = 0.95
+            ax.text(0.5, y, title, ha="center", va="top", fontsize=22, fontweight="bold", transform=ax.transAxes)
+            y -= 0.08
+
+            for line in subtitle_lines:
+                ax.text(0.5, y, line, ha="center", va="top", fontsize=11, transform=ax.transAxes)
+                y -= 0.035
+
+            y -= 0.03
+            ax.hlines(y, 0.12, 0.88, transform=ax.transAxes, linewidth=1.0)
+            y -= 0.05
+
+            for line in body_lines:
+                ax.text(0.12, y, line, ha="left", va="top", fontsize=11, transform=ax.transAxes)
+                y -= 0.045
+
+            plt.savefig(path, bbox_inches="tight", facecolor="white")
+            plt.close(fig)
+
+        # Cover page
+        cover_path = os.path.join(report_dir, "astroflow_cover.png")
+        cover_lines = [
+            f"Target: {rpt_target}",
+            f"Author(s): {rpt_author}",
+            f"Instrument / Mission: {rpt_instrument or 'Not specified'}",
+            f"Generated: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}",
+            "",
+            f"Files analysed: {report_metrics['n_files']}",
+            f"Spectra extracted: {report_metrics['n_spectra']}",
+            f"Images rendered: {report_metrics['n_images']}",
+            f"Skipped items: {report_metrics['n_skipped']}",
+            f"Warnings: {report_metrics['n_warnings']}",
+            f"Errors: {report_metrics['n_errors']}",
+            "",
+            "Methods:",
+            "• Sigma clipping",
+            "• MAD-based outlier detection",
+            "• Savitzky–Golay continuum estimation",
+            "• Peak prominence detection",
+            "• Optional Specutils line finding",
+        ]
+        _save_text_page(
+            cover_path,
+            "AstroFlow",
+            ["Astronomical FITS Processing and Spectral Analysis Report"],
+            cover_lines,
+        )
+        plots.append(cover_path)
+
+        # Executive summary page
+        report_progress.progress(10, text="Creating summary pages…")
+        summary_path = os.path.join(report_dir, "astroflow_summary.png")
+        summary_lines = [
+            f"Processed files: {report_metrics['n_files']}",
+            f"Extracted spectra: {report_metrics['n_spectra']}",
+            f"Rendered images: {report_metrics['n_images']}",
+            f"Skipped items: {report_metrics['n_skipped']}",
+            f"Warnings: {report_metrics['n_warnings']}",
+            f"Errors: {report_metrics['n_errors']}",
+            "",
+            "Notes:",
+            (rpt_notes or "No additional notes provided.").strip() or "No additional notes provided.",
+        ]
+        _save_text_page(
+            summary_path,
+            "Executive Summary",
+            ["Overview of the current analysis session"],
+            summary_lines,
+        )
+        plots.append(summary_path)
+
+        # Methods page
+        methods_path = os.path.join(report_dir, "astroflow_methods.png")
+        methods_lines = [
+            "Spectrum handling:",
+            "• 1D arrays and table-based wavelength/flux pairs are extracted as spectra.",
+            "• Unsupported HDU types and non-science extensions are skipped.",
+            "",
+            "Analysis methods:",
+            "• Sigma clipping removes gross outliers before continuum estimation.",
+            "• Savitzky–Golay smoothing estimates the local continuum.",
+            "• Residuals are analysed with MAD-based thresholds.",
+            "• Peak prominence is used for emission and absorption feature detection.",
+            "",
+            "Report generation:",
+            "• Spectra plots and FITS images are compiled into a single PDF.",
+            "• Duplicate images are removed using file+HDU deduplication.",
+        ]
+        _save_text_page(
+            methods_path,
+            "Methods",
+            ["AstroFlow processing and detection workflow"],
+            methods_lines,
+        )
+        plots.append(methods_path)
+
+        # Optional processing log page
+        log_path = os.path.join(report_dir, "astroflow_log.png")
+        log_lines = [
+            f"Skipped items: {len(processing_summary['skipped'])}",
+            f"Warnings: {len(processing_summary['warnings'])}",
+            f"Errors: {len(processing_summary['errors'])}",
+            "",
+            "Processing log excerpt:",
+        ]
+        if processing_summary["skipped"]:
+            for item in processing_summary["skipped"][:8]:
+                log_lines.append(f"• {item.get('file', 'Unknown')}: {item.get('reason', 'Skipped')}")
+        else:
+            log_lines.append("• No skipped items.")
+        _save_text_page(
+            log_path,
+            "Processing Log",
+            ["Concise summary of skipped or notable items"],
+            log_lines,
+        )
+        plots.append(log_path)
 
         # Save 1D spectra as clean PNGs
         for ri, res in enumerate(spec_results_for_report):
             report_progress.progress(
-                int(ri / n_report_steps * 80),
+                int((ri + 3) / n_report_steps * 80),
                 text=f"Plotting spectrum {ri + 1}/{len(spec_results_for_report)}…"
             )
             wl = res["wl"]
@@ -1178,23 +1431,17 @@ with tabs[4]:
             buf = io.BytesIO()
             fig_rpt, ax_rpt = plt.subplots(figsize=(8, 4.5), dpi=200)
 
-            # Raw spectrum
-            ax_rpt.plot(wl, fl, color='steelblue', alpha=0.7, linewidth=1.2, label='Raw')
-
-            # Smoothed spectrum (if enabled)
+            ax_rpt.plot(wl, fl, color="steelblue", alpha=0.8, linewidth=1.2, label="Raw")
             if fl_smooth_rpt is not None:
-                ax_rpt.plot(wl, fl_smooth_rpt, color='red', linewidth=2.0, label='Smoothed')
+                ax_rpt.plot(wl, fl_smooth_rpt, color="darkred", linewidth=2.0, label="Smoothed")
 
-            # Ensure full data range is shown clearly
             ax_rpt.set_xlabel(x_label, fontsize=11)
             ax_rpt.set_ylabel(y_label, fontsize=11)
             ax_rpt.set_title(f"{res['file']} · HDU {res.get('hdu_index')}", fontsize=12)
 
-            # Auto-adjust limits to data range
             ax_rpt.margins(x=0.02, y=0.05)
-            ax_rpt.autoscale(enable=True, axis='both', tight=False)
-
-            ax_rpt.legend(fontsize=10, loc='best')
+            ax_rpt.autoscale(enable=True, axis="both", tight=False)
+            ax_rpt.legend(fontsize=10, loc="best")
             ax_rpt.grid(True, alpha=0.3)
 
             plt.tight_layout()
@@ -1202,14 +1449,14 @@ with tabs[4]:
             plt.close(fig_rpt)
             buf.seek(0)
 
-            img_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res.get('hdu_index')}_spectrum.png")
+            img_path = os.path.join(report_dir, f"{res['file']}_hdu{res.get('hdu_index')}_spectrum.png")
             with open(img_path, "wb") as fh:
                 fh.write(buf.read())
             plots.append(img_path)
 
         # Collect 2D FITS images for report — deduplicate by file+hdu combo
         img_count_rpt = 0
-        seen_img_combos = set()   # tracks (file_path, hdu_index) already rendered
+        seen_img_combos = set()
         for r in results:
             if img_count_rpt >= MAX_IMAGES:
                 break
@@ -1225,7 +1472,7 @@ with tabs[4]:
                             continue
                         if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
                             seen_img_combos.add(combo)
-                            img_path = os.path.join(tempfile.gettempdir(), f"{r['file']}_hdu{idx}_image.png")
+                            img_path = os.path.join(report_dir, f"{r['file']}_hdu{idx}_image.png")
                             plot_data = hdu.data.astype(float)
                             vmin = np.nanpercentile(plot_data, 1)
                             vmax = np.nanpercentile(plot_data, 99)
@@ -1237,9 +1484,8 @@ with tabs[4]:
 
         report_progress.progress(90, text="Compiling PDF…")
 
-        # Sanitized metadata
-        safe_title = f"AstroFlow Analysis Report - {rpt_target}".replace('\u2014', '-').replace('\u2013', '-')
-        safe_notes = (rpt_notes or "").replace('\u2014', '-').replace('\u2013', '-').replace('\u2018', "'").replace('\u2019', "'")
+        safe_title = f"AstroFlow Analysis Report - {rpt_target}".replace("\u2014", "-").replace("\u2013", "-")
+        safe_notes = (rpt_notes or "").replace("\u2014", "-").replace("\u2013", "-").replace("\u2018", "'").replace("\u2019", "'")
 
         report_metadata = {
             "title": safe_title,
@@ -1250,15 +1496,19 @@ with tabs[4]:
             "generated": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
             "n_spectra": len(spec_results_for_report),
             "files": list({r["file"] for r in spec_results_for_report}),
+            "n_files": report_metrics["n_files"],
+            "n_images": report_metrics["n_images"],
+            "n_skipped": report_metrics["n_skipped"],
+            "n_warnings": report_metrics["n_warnings"],
+            "n_errors": report_metrics["n_errors"],
         }
 
-        # Generate PDF
         try:
             pdf_path = generate_pdf_report(
                 output_path=tmp_pdf,
                 metadata=report_metadata,
                 plots=plots,
-                tables=[],      # Empty - no tables
+                tables=[],
                 images=images,
             )
         except Exception as e:
@@ -1277,10 +1527,11 @@ with tabs[4]:
                     data=f,
                     file_name=os.path.basename(pdf_path),
                     mime="application/pdf",
-                    key=make_key('pdf_report', rpt_key_n)
+                    key=make_key("pdf_report", rpt_key_n),
                 )
         else:
             st.error("PDF report was not generated.")
+
 
 # ---------------------------
 # Anomaly Detection tab
