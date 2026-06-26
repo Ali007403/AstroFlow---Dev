@@ -1140,8 +1140,9 @@ with tabs[3]:
 # Reports tab
 with tabs[4]:
     st.header("Generate PDF Report")
-    st.markdown("Compile spectra plots and FITS images into a single PDF with a cover page and summary pages.")
+    st.markdown("Compile spectra plots and FITS images into a single PDF.")
 
+    # Report metadata inputs
     rpt_col1, rpt_col2 = st.columns(2)
     with rpt_col1:
         rpt_target = st.text_input("Target / Object name", value=mast_target if mast_target else "Unknown Target")
@@ -1150,155 +1151,21 @@ with tabs[4]:
         rpt_instrument = st.text_input("Instrument / Mission", value="")
         rpt_notes = st.text_area("Report notes (optional)", value="", height=68)
 
-    st.markdown("#### Report contents")
-    st.caption("The report will include a cover page, a summary page, a methods page, then the selected spectra and images.")
-
     if st.button("Generate Report"):
         tmp_pdf = os.path.join(tempfile.gettempdir(), f"astroflow_report_{int(time.time())}.pdf")
         plots = []
         images = []
+        # tables = []  # Removed - no CSV tables in PDF
 
         spec_results_for_report = [r for r in results if r.get("wl") is not None and r.get("fl") is not None]
-        report_metrics = {
-            "n_files": len(results),
-            "n_spectra": len(spec_results_for_report),
-            "n_images": sum(1 for r in results if r.get("path")),
-            "n_skipped": len(processing_summary["skipped"]) if "processing_summary" in locals() else 0,
-            "n_warnings": len(processing_summary["warnings"]) if "processing_summary" in locals() else 0,
-            "n_errors": len(processing_summary["errors"]) if "processing_summary" in locals() else 0,
-        }
 
         report_progress = st.progress(0, text="Building report…")
-        n_report_steps = max(len(spec_results_for_report) + 3, 1)
-
-        report_dir = tempfile.mkdtemp()
-
-        def _save_text_page(path, title, subtitle_lines, body_lines):
-            fig, ax = plt.subplots(figsize=(8.27, 11.69), dpi=200)
-            ax.axis("off")
-
-            y = 0.95
-            ax.text(0.5, y, title, ha="center", va="top", fontsize=22, fontweight="bold", transform=ax.transAxes)
-            y -= 0.08
-
-            for line in subtitle_lines:
-                ax.text(0.5, y, line, ha="center", va="top", fontsize=11, transform=ax.transAxes)
-                y -= 0.035
-
-            y -= 0.03
-            ax.hlines(y, 0.12, 0.88, transform=ax.transAxes, linewidth=1.0)
-            y -= 0.05
-
-            for line in body_lines:
-                ax.text(0.12, y, line, ha="left", va="top", fontsize=11, transform=ax.transAxes)
-                y -= 0.045
-
-            plt.savefig(path, bbox_inches="tight", facecolor="white")
-            plt.close(fig)
-
-        # Cover page
-        cover_path = os.path.join(report_dir, "astroflow_cover.png")
-        cover_lines = [
-            f"Target: {rpt_target}",
-            f"Author(s): {rpt_author}",
-            f"Instrument / Mission: {rpt_instrument or 'Not specified'}",
-            f"Generated: {time.strftime('%Y-%m-%d %H:%M UTC', time.gmtime())}",
-            "",
-            f"Files analysed: {report_metrics['n_files']}",
-            f"Spectra extracted: {report_metrics['n_spectra']}",
-            f"Images rendered: {report_metrics['n_images']}",
-            f"Skipped items: {report_metrics['n_skipped']}",
-            f"Warnings: {report_metrics['n_warnings']}",
-            f"Errors: {report_metrics['n_errors']}",
-            "",
-            "Methods:",
-            "• Sigma clipping",
-            "• MAD-based outlier detection",
-            "• Savitzky–Golay continuum estimation",
-            "• Peak prominence detection",
-            "• Optional Specutils line finding",
-        ]
-        _save_text_page(
-            cover_path,
-            "AstroFlow",
-            ["Astronomical FITS Processing and Spectral Analysis Report"],
-            cover_lines,
-        )
-        plots.append(cover_path)
-
-        # Executive summary page
-        report_progress.progress(10, text="Creating summary pages…")
-        summary_path = os.path.join(report_dir, "astroflow_summary.png")
-        summary_lines = [
-            f"Processed files: {report_metrics['n_files']}",
-            f"Extracted spectra: {report_metrics['n_spectra']}",
-            f"Rendered images: {report_metrics['n_images']}",
-            f"Skipped items: {report_metrics['n_skipped']}",
-            f"Warnings: {report_metrics['n_warnings']}",
-            f"Errors: {report_metrics['n_errors']}",
-            "",
-            "Notes:",
-            (rpt_notes or "No additional notes provided.").strip() or "No additional notes provided.",
-        ]
-        _save_text_page(
-            summary_path,
-            "Executive Summary",
-            ["Overview of the current analysis session"],
-            summary_lines,
-        )
-        plots.append(summary_path)
-
-        # Methods page
-        methods_path = os.path.join(report_dir, "astroflow_methods.png")
-        methods_lines = [
-            "Spectrum handling:",
-            "• 1D arrays and table-based wavelength/flux pairs are extracted as spectra.",
-            "• Unsupported HDU types and non-science extensions are skipped.",
-            "",
-            "Analysis methods:",
-            "• Sigma clipping removes gross outliers before continuum estimation.",
-            "• Savitzky–Golay smoothing estimates the local continuum.",
-            "• Residuals are analysed with MAD-based thresholds.",
-            "• Peak prominence is used for emission and absorption feature detection.",
-            "",
-            "Report generation:",
-            "• Spectra plots and FITS images are compiled into a single PDF.",
-            "• Duplicate images are removed using file+HDU deduplication.",
-        ]
-        _save_text_page(
-            methods_path,
-            "Methods",
-            ["AstroFlow processing and detection workflow"],
-            methods_lines,
-        )
-        plots.append(methods_path)
-
-        # Optional processing log page
-        log_path = os.path.join(report_dir, "astroflow_log.png")
-        log_lines = [
-            f"Skipped items: {len(processing_summary['skipped'])}",
-            f"Warnings: {len(processing_summary['warnings'])}",
-            f"Errors: {len(processing_summary['errors'])}",
-            "",
-            "Processing log excerpt:",
-        ]
-        if processing_summary["skipped"]:
-            for item in processing_summary["skipped"][:8]:
-                log_lines.append(f"• {item.get('file', 'Unknown')}: {item.get('reason', 'Skipped')}")
-        else:
-            log_lines.append("• No skipped items.")
-        _save_text_page(
-            log_path,
-            "Processing Log",
-            ["Concise summary of skipped or notable items"],
-            log_lines,
-        )
-        plots.append(log_path)
+        n_report_steps = max(len(spec_results_for_report) + 1, 1)
 
         # Save 1D spectra as clean PNGs
         for ri, res in enumerate(spec_results_for_report):
             report_progress.progress(
-                int((ri + 3) / n_report_steps * 80),
+                int(ri / n_report_steps * 80),
                 text=f"Plotting spectrum {ri + 1}/{len(spec_results_for_report)}…"
             )
             wl = res["wl"]
@@ -1311,17 +1178,23 @@ with tabs[4]:
             buf = io.BytesIO()
             fig_rpt, ax_rpt = plt.subplots(figsize=(8, 4.5), dpi=200)
 
-            ax_rpt.plot(wl, fl, color="steelblue", alpha=0.8, linewidth=1.2, label="Raw")
-            if fl_smooth_rpt is not None:
-                ax_rpt.plot(wl, fl_smooth_rpt, color="darkred", linewidth=2.0, label="Smoothed")
+            # Raw spectrum
+            ax_rpt.plot(wl, fl, color='steelblue', alpha=0.7, linewidth=1.2, label='Raw')
 
+            # Smoothed spectrum (if enabled)
+            if fl_smooth_rpt is not None:
+                ax_rpt.plot(wl, fl_smooth_rpt, color='red', linewidth=2.0, label='Smoothed')
+
+            # Ensure full data range is shown clearly
             ax_rpt.set_xlabel(x_label, fontsize=11)
             ax_rpt.set_ylabel(y_label, fontsize=11)
             ax_rpt.set_title(f"{res['file']} · HDU {res.get('hdu_index')}", fontsize=12)
 
+            # Auto-adjust limits to data range
             ax_rpt.margins(x=0.02, y=0.05)
-            ax_rpt.autoscale(enable=True, axis="both", tight=False)
-            ax_rpt.legend(fontsize=10, loc="best")
+            ax_rpt.autoscale(enable=True, axis='both', tight=False)
+
+            ax_rpt.legend(fontsize=10, loc='best')
             ax_rpt.grid(True, alpha=0.3)
 
             plt.tight_layout()
@@ -1329,14 +1202,14 @@ with tabs[4]:
             plt.close(fig_rpt)
             buf.seek(0)
 
-            img_path = os.path.join(report_dir, f"{res['file']}_hdu{res.get('hdu_index')}_spectrum.png")
+            img_path = os.path.join(tempfile.gettempdir(), f"{res['file']}_hdu{res.get('hdu_index')}_spectrum.png")
             with open(img_path, "wb") as fh:
                 fh.write(buf.read())
             plots.append(img_path)
 
         # Collect 2D FITS images for report — deduplicate by file+hdu combo
         img_count_rpt = 0
-        seen_img_combos = set()
+        seen_img_combos = set()   # tracks (file_path, hdu_index) already rendered
         for r in results:
             if img_count_rpt >= MAX_IMAGES:
                 break
@@ -1352,7 +1225,7 @@ with tabs[4]:
                             continue
                         if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
                             seen_img_combos.add(combo)
-                            img_path = os.path.join(report_dir, f"{r['file']}_hdu{idx}_image.png")
+                            img_path = os.path.join(tempfile.gettempdir(), f"{r['file']}_hdu{idx}_image.png")
                             plot_data = hdu.data.astype(float)
                             vmin = np.nanpercentile(plot_data, 1)
                             vmax = np.nanpercentile(plot_data, 99)
@@ -1364,8 +1237,9 @@ with tabs[4]:
 
         report_progress.progress(90, text="Compiling PDF…")
 
-        safe_title = f"AstroFlow Analysis Report - {rpt_target}".replace("\u2014", "-").replace("\u2013", "-")
-        safe_notes = (rpt_notes or "").replace("\u2014", "-").replace("\u2013", "-").replace("\u2018", "'").replace("\u2019", "'")
+        # Sanitized metadata
+        safe_title = f"AstroFlow Analysis Report - {rpt_target}".replace('\u2014', '-').replace('\u2013', '-')
+        safe_notes = (rpt_notes or "").replace('\u2014', '-').replace('\u2013', '-').replace('\u2018', "'").replace('\u2019', "'")
 
         report_metadata = {
             "title": safe_title,
@@ -1376,19 +1250,15 @@ with tabs[4]:
             "generated": time.strftime("%Y-%m-%d %H:%M UTC", time.gmtime()),
             "n_spectra": len(spec_results_for_report),
             "files": list({r["file"] for r in spec_results_for_report}),
-            "n_files": report_metrics["n_files"],
-            "n_images": report_metrics["n_images"],
-            "n_skipped": report_metrics["n_skipped"],
-            "n_warnings": report_metrics["n_warnings"],
-            "n_errors": report_metrics["n_errors"],
         }
 
+        # Generate PDF
         try:
             pdf_path = generate_pdf_report(
                 output_path=tmp_pdf,
                 metadata=report_metadata,
                 plots=plots,
-                tables=[],
+                tables=[],      # Empty - no tables
                 images=images,
             )
         except Exception as e:
@@ -1407,7 +1277,7 @@ with tabs[4]:
                     data=f,
                     file_name=os.path.basename(pdf_path),
                     mime="application/pdf",
-                    key=make_key("pdf_report", rpt_key_n),
+                    key=make_key('pdf_report', rpt_key_n)
                 )
         else:
             st.error("PDF report was not generated.")
