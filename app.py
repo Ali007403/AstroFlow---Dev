@@ -63,63 +63,54 @@ def safe_names(arr):
 
 def try_extract_spectrum(hdu):
     """
-    Returns: (wl_array, fl_array, labels_dict, skip_reason)
+    Returns: (wl_array, fl_array, labels_dict)
+    labels_dict contains keys: x_label, y_label
 
-    skip_reason is None on success, or a human-readable string explaining
-    why this HDU cannot be processed — used by callers to show warnings
-    instead of crashing or silently dropping data.
-
-    Supported: 1D arrays, 2D images (collapsed to 1D mean), BinTable/Table
-               HDUs with detectable wavelength+flux columns.
-    Not supported: 3D/4D data cubes, CompImageHDU (tile-compressed imaging),
-                   RandomGroupsHDU, HDUs with no numeric data, variable-length
-                   array columns that cannot be flattened to 1D.
+    Skips HDUs that are known non-science data products (DQ flags,
+    error arrays, weight maps, calibration tables) by checking EXTNAME
+    before touching the data. This prevents bitmask/flag arrays from
+    being plotted as spectra.
     """
     default_labels = {"x_label": "Wavelength", "y_label": "Flux"}
 
-    # --- Classify HDU type before touching .data (safe, header-only) ---
-    hdu_type = type(hdu).__name__
+    # --- EXTNAME filter: skip known non-science HDU types ---
+    # These are standard FITS extension names for calibration, quality,
+    # and error data that should never be treated as spectra.
+    NON_SCIENCE_EXTNAMES = {
+        # Data quality / flag arrays
+        'DQ', 'DQ1', 'DQ2', 'DQ3',
+        # Error / uncertainty arrays
+        'ERR', 'ERR1', 'ERR2', 'SIGMA', 'NOISE', 'STDEV',
+        # Variance arrays (JWST pipeline products)
+        'VAR_POISSON', 'VAR_RNOISE', 'VAR_FLAT', 'VAR_RAMP',
+        # Weight / exposure maps
+        'WHT', 'WEIGHT', 'EXP', 'EXPTIME', 'CTX',
+        # Background arrays
+        'BKG', 'BACKGROUND',
+        # Contamination / model
+        'CONTAM', 'MODEL',
+        # Kernel / PSF
+        'KERNEL', 'PSF',
+        # Sample / groupdq (JWST raw ramp data)
+        'GROUPDQ', 'PIXELDQ',
+        # Wavelength solution / reference arrays stored as calibration tables
+        'WAVELENGTH', 'WCSCORR', 'HDRTAB', 'ASDF',
+        # HST-specific calibration extensions
+        'D2IMARR', 'WCSDVARR', 'SIPWCS',
+    }
 
-    # CompImageHDU: tile-compressed — decompression can use gigabytes of RAM
-    if hdu_type == "CompImageHDU":
-        return None, None, default_labels, (
-            f"Tile-compressed image (CompImageHDU) — decompression requires "
-            f"too much memory for hosted deployment. Download the file locally "
-            f"and use a tool like ds9 or astropy locally to inspect."
-        )
-
-    # RandomGroupsHDU: legacy radio format, no standard wavelength axis
-    if hdu_type == "GroupsHDU":
-        return None, None, default_labels, (
-            "Random Groups HDU (legacy radio format) — not supported. "
-            "AstroFlow supports 1D spectra and 2D images only."
-        )
-
-    # Check NAXIS before loading data — avoids RAM spike on large cubes
     try:
-        naxis = hdu.header.get("NAXIS", 0)
-        if naxis > 2 and hdu_type not in ("BinTableHDU", "TableHDU"):
-            naxis_dims = [hdu.header.get(f"NAXIS{i}", "?") for i in range(1, naxis + 1)]
-            dims_str = " × ".join(str(d) for d in naxis_dims)
-            return None, None, default_labels, (
-                f"{naxis}D data cube ({dims_str} px) — only 1D and 2D arrays "
-                f"are supported. Multi-extension spectral cubes (e.g. IFU, ramp "
-                f"data) cannot be processed by AstroFlow."
-            )
+        extname = str(hdu.header.get('EXTNAME', '')).strip().upper()
+        if extname in NON_SCIENCE_EXTNAMES:
+            return None, None, default_labels
     except Exception:
         pass
 
-    # Now safe to access .data
-    try:
-        data = hdu.data
-    except Exception as e:
-        return None, None, default_labels, f"Could not read HDU data: {e}"
-
+    data = hdu.data
     if data is None:
-        # Header-only HDU (NAXIS=0) — normal and expected, not an error
-        return None, None, default_labels, None
+        return None, None, default_labels
 
-    # --- Table-like HDU: BinTableHDU / TableHDU ---
+    # Table-like HDU -> try pandas + map_columns
     try:
         if hasattr(data, 'names') or (hasattr(data, 'dtype') and data.dtype.names is not None):
             import pandas as _pd
@@ -132,63 +123,52 @@ def try_extract_spectrum(hdu):
                 fl = _pd.to_numeric(df[fl_col], errors="coerce").to_numpy(dtype=float)
                 mask = np.isfinite(wl) & np.isfinite(fl)
                 if np.any(mask):
-                    return wl[mask], fl[mask], {"x_label": wl_col, "y_label": fl_col}, None
+                    labels = {"x_label": wl_col, "y_label": fl_col}
+                    return wl[mask], fl[mask], labels
 
             # Fallback: first two numeric columns
+            # Guard: skip tables whose first numeric column looks like a
+            # metadata reference table (e.g. EXTVER/CRVAL1 diagonal lines).
+            # A real spectrum has >> 10 rows; metadata tables rarely do.
             names = safe_names(data)
             nums = [n for n in names if np.issubdtype(data[n].dtype, np.number)]
             if len(nums) >= 2:
+                n_rows = len(data)
+                if n_rows < 5:
+                    # Too few rows to be a real spectrum — skip silently
+                    return None, None, default_labels
                 wl = np.array(data[nums[0]]).astype(float).flatten()
                 fl = np.array(data[nums[1]]).astype(float).flatten()
                 mask = np.isfinite(wl) & np.isfinite(fl)
                 if np.any(mask):
-                    return wl[mask], fl[mask], {"x_label": nums[0], "y_label": nums[1]}, None
-
-            # Table found but no usable numeric columns
-            col_list = ", ".join(safe_names(data)[:8]) or "none"
-            return None, None, default_labels, (
-                f"Table HDU has no detectable wavelength/flux column pair. "
-                f"Columns found: {col_list}. "
-                f"AstroFlow needs at least two numeric columns."
-            )
+                    labels = {"x_label": nums[0], "y_label": nums[1]}
+                    return wl[mask], fl[mask], labels
     except Exception:
         pass
 
-    # --- Image-like HDU: 1D or 2D only ---
+    # Image-like HDU: collapse to 1D or return pixel index
     try:
         arr = np.array(data)
         if arr.ndim == 1:
             wl = np.arange(arr.size)
             fl = arr.astype(float)
             mask = np.isfinite(fl)
-            return wl[mask], fl[mask], {"x_label": "Index", "y_label": "Value"}, None
-
+            return wl[mask], fl[mask], {"x_label": "Index", "y_label": "Value"}
         elif arr.ndim == 2:
+            # Guard against empty-slice RuntimeWarning on zero-row 2D HDUs
             if arr.shape[0] == 0 or arr.shape[1] == 0:
-                return None, None, default_labels, "Empty 2D array (zero rows or columns)."
+                return None, None, default_labels
             with np.errstate(all="ignore"):
                 fl = np.nanmean(arr, axis=0)
             if not np.any(np.isfinite(fl)):
-                return None, None, default_labels, "2D image HDU contains no finite values."
+                return None, None, default_labels
             wl = np.arange(fl.size)
             mask = np.isfinite(fl)
-            return wl[mask], fl[mask], {"x_label": "Pixel", "y_label": "Mean(pixel rows)"}, None
+            return wl[mask], fl[mask], {"x_label": "Pixel", "y_label": "Mean(pixel rows)"}
+    except Exception:
+        pass
 
-        else:
-            # Should have been caught by NAXIS check above, but catch here too
-            return None, None, default_labels, (
-                f"{arr.ndim}D array — only 1D spectra and 2D images are supported."
-            )
-    except MemoryError:
-        return None, None, default_labels, (
-            "Insufficient memory to load this HDU. The array is too large for "
-            "the current hosting environment (~1 GB RAM limit on Streamlit Cloud). "
-            "Process this file locally."
-        )
-    except Exception as e:
-        return None, None, default_labels, f"Could not convert HDU data to array: {e}"
-
-    return None, None, default_labels, None
+    return None, None, default_labels
 
 def interp_to_reference(wl, fl, ref_wl):
     try:
@@ -348,98 +328,53 @@ def mast_download_products(observation_row):
 def mast_import_fits(file_path):
     """
     Import downloaded FITS into AstroFlow format.
-    Shows a clear warning for each HDU that cannot be processed,
-    explaining why, instead of silently skipping or crashing.
-    Automatically retries with memmap=False for BZERO/BSCALE files.
+    Skips files larger than MAX_FILE_MB to prevent memory crashes.
+    Uses memmap=True for efficient lazy loading of large FITS.
     """
     imported_results = []
-    fname = os.path.basename(file_path)
 
-    # File size info — warn but always attempt
+    # File size guard
     try:
         file_mb = os.path.getsize(file_path) / (1024 * 1024)
     except OSError:
         file_mb = 0
 
-    if file_mb > 500:
+    if file_mb > MAX_FILE_MB:
         st.warning(
-            f"⚠️ **{fname}** is {file_mb:.0f} MB. This may be slow or fail on "
-            f"Streamlit Cloud (~1 GB RAM limit). If it fails, download locally "
-            f"and re-upload directly."
+            f"Skipping **{os.path.basename(file_path)}** "
+            f"({file_mb:.0f} MB > {MAX_FILE_MB} MB limit). "
+            f"Process locally for large imaging files."
         )
+        return imported_results
 
-    skipped_hdus = []   # collect (hdu_index, reason) for a single summary warning
+    try:
+        with fits.open(file_path, memmap=True) as hdul:
+            for idx, hdu in enumerate(hdul):
+                wl, fl, labels = try_extract_spectrum(hdu)
 
-    def _extract_from_hdul(hdul):
-        extracted = []
-        for idx, hdu in enumerate(hdul):
-            wl, fl, labels, reason = try_extract_spectrum(hdu)
-            if wl is not None and fl is not None:
-                extracted.append({
-                    "file": fname,
+                if wl is None:
+                    continue
+
+                imported_results.append({
+                    "file": os.path.basename(file_path),
                     "path": file_path,
                     "hdu_index": idx,
                     "header": dict(hdu.header),
                     "wl": np.array(wl, dtype=float),
                     "fl": np.array(fl, dtype=float),
                     "err": None,
-                    "x_label": labels.get("x_label", "Wavelength"),
-                    "y_label": labels.get("y_label", "Flux"),
+                    "x_label": labels.get(
+                        "x_label",
+                        "Wavelength"
+                    ),
+                    "y_label": labels.get(
+                        "y_label",
+                        "Flux"
+                    ),
                 })
-            elif reason:
-                # Only record non-trivial skips (ignore header-only HDU 0 with no reason)
-                skipped_hdus.append((idx, reason))
-        return extracted
-
-    try:
-        try:
-            with fits.open(file_path, memmap=True) as hdul:
-                imported_results = _extract_from_hdul(hdul)
-        except Exception as e:
-            err_str = str(e)
-            # BZERO/BSCALE/BLANK headers require memmap=False — retry silently
-            if any(kw in err_str for kw in
-                   ("BZERO", "BSCALE", "BLANK", "memory-mapped", "Cannot load")):
-                with fits.open(file_path, memmap=False) as hdul:
-                    imported_results = _extract_from_hdul(hdul)
-            else:
-                raise
-
-    except MemoryError:
-        st.error(
-            f"❌ **{fname}** — ran out of memory while loading. "
-            f"Streamlit Cloud has ~1 GB RAM. This file is too large to process "
-            f"in the hosted environment. Download the file locally and run "
-            f"AstroFlow on your own machine for full processing."
-        )
-        return imported_results
 
     except Exception as e:
-        st.error(
-            f"❌ **{fname}** could not be opened: {e}\n\n"
-            f"Supported formats: standard FITS with 1D spectra, 2D images, "
-            f"or BinTable HDUs containing wavelength and flux columns."
-        )
-        return imported_results
-
-    # Show a single collapsible warning for all skipped HDUs
-    if skipped_hdus:
-        with st.expander(
-            f"⚠️ {fname} — {len(skipped_hdus)} HDU(s) skipped (click to see why)",
-            expanded=False
-        ):
-            st.markdown(
-                "AstroFlow supports **1D spectra**, **2D images**, and "
-                "**tables with wavelength/flux columns**. "
-                "The following HDUs from this file could not be processed:"
-            )
-            for hdu_idx, reason in skipped_hdus:
-                st.markdown(f"- **HDU {hdu_idx}:** {reason}")
-            st.markdown(
-                "_These are not errors — they are incompatible data formats "
-                "within this FITS file. Any supported HDUs above have been "
-                "imported successfully._"
-            )
+        st.error(f"Failed to import FITS: {e}")
 
     return imported_results
 
@@ -580,79 +515,41 @@ if uploaded:
                 st.error(f"Failed to parse CSV {fname}: {e}")
             continue
 
-        # FITS handling — memmap=True first, BZERO fallback, per-HDU warnings
-        up_skipped = []   # (hdu_index, reason) for unsupported HDUs
-
-        def _extract_upload(hdul, fname_inner, dst_inner):
-            found = False
-            for idx, hdu in enumerate(hdul):
-                wl, fl, labels, reason = try_extract_spectrum(hdu)
-                if wl is not None and fl is not None:
-                    found = True
+        # FITS handling — memmap=True for efficient large-file loading
+        try:
+            with fits.open(dst, memmap=True) as hdul:
+                found_any = False
+                for idx, hdu in enumerate(hdul):
+                    wl, fl, labels = try_extract_spectrum(hdu)
+                    if wl is None:
+                        continue
+                    found_any = True
+                    err = None
                     uploaded_results.append({
-                        "file": fname_inner,
-                        "path": dst_inner,
+                        "file": fname,
+                        "path": dst,
                         "hdu_index": idx,
                         "header": dict(hdu.header) if hasattr(hdu, "header") else {},
                         "wl": np.array(wl, dtype=float),
                         "fl": np.array(fl, dtype=float),
-                        "err": None,
+                        "err": err,
                         "x_label": labels.get("x_label", "Wavelength"),
                         "y_label": labels.get("y_label", "Flux"),
                     })
-                elif reason:
-                    up_skipped.append((idx, reason))
-            return found
-
-        try:
-            try:
-                with fits.open(dst, memmap=True) as hdul:
-                    found_any = _extract_upload(hdul, fname, dst)
-            except Exception as e_mm:
-                err_str = str(e_mm)
-                if any(kw in err_str for kw in
-                       ("BZERO", "BSCALE", "BLANK", "memory-mapped", "Cannot load")):
-                    with fits.open(dst, memmap=False) as hdul:
-                        found_any = _extract_upload(hdul, fname, dst)
-                else:
-                    raise
-
-            if not found_any and not up_skipped:
-                uploaded_results.append({
-                    "file": fname, "path": dst, "hdu_index": None,
-                    "header": {}, "wl": None, "fl": None, "err": None,
-                    "x_label": "Wavelength", "y_label": "Flux",
-                })
-
-        except MemoryError:
-            st.error(
-                f"❌ **{fname}** — ran out of memory. "
-                f"Streamlit Cloud has ~1 GB RAM. Try uploading a smaller file, "
-                f"or run AstroFlow locally for large datasets."
-            )
+                if not found_any:
+                    uploaded_results.append({
+                        "file": fname,
+                        "path": dst,
+                        "hdu_index": None,
+                        "header": {},
+                        "wl": None,
+                        "fl": None,
+                        "err": None,
+                        "x_label": "Wavelength",
+                        "y_label": "Flux",
+                    })
         except Exception as e:
-            st.error(
-                f"❌ **{fname}** could not be opened: {e}\n\n"
-                f"Supported formats: FITS files with 1D spectra, 2D images, "
-                f"or BinTable HDUs with wavelength and flux columns."
-            )
-
-        if up_skipped:
-            with st.expander(
-                f"⚠️ {fname} — {len(up_skipped)} HDU(s) skipped (click to see why)",
-                expanded=False
-            ):
-                st.markdown(
-                    "AstroFlow supports **1D spectra**, **2D images**, and "
-                    "**tables with wavelength/flux columns**. "
-                    "The following HDUs could not be processed:"
-                )
-                for hdu_idx, reason in up_skipped:
-                    st.markdown(f"- **HDU {hdu_idx}:** {reason}")
-                st.markdown(
-                    "_These are not errors — they are incompatible data formats "
-                    "within this FITS file. Any supported HDUs have been loaded._"
-                )
+            st.error(f"Failed to open {fname}: {e}")
 
     progress.progress(100, text="✅ All files processed.")
     if status_text:
@@ -1008,7 +905,7 @@ with tabs[4]:
             x_label = res.get("x_label", "Wavelength")
             y_label = res.get("y_label", "Flux")
 
-            fl_smooth_rpt = smooth_flux(fl.copy(), smoothing_window, polyorder) if smoothing_enabled else None
+            fl_smooth_rpt = smooth_flux(fl.copy(), smoothing_window, polyorder) if show_smooth else None
 
             buf = io.BytesIO()
             fig_rpt, ax_rpt = plt.subplots(figsize=(8, 4.5), dpi=200)
@@ -1042,8 +939,9 @@ with tabs[4]:
                 fh.write(buf.read())
             plots.append(img_path)
 
-        # Collect 2D FITS images
+        # Collect 2D FITS images for report — deduplicate by file+hdu combo
         img_count_rpt = 0
+        seen_img_combos = set()   # tracks (file_path, hdu_index) already rendered
         for r in results:
             if img_count_rpt >= MAX_IMAGES:
                 break
@@ -1054,7 +952,11 @@ with tabs[4]:
                     for idx, hdu in enumerate(hdul):
                         if img_count_rpt >= MAX_IMAGES:
                             break
+                        combo = (r["path"], idx)
+                        if combo in seen_img_combos:
+                            continue
                         if hdu.data is not None and hasattr(hdu.data, "shape") and hdu.data.ndim == 2:
+                            seen_img_combos.add(combo)
                             img_path = os.path.join(tempfile.gettempdir(), f"{r['file']}_hdu{idx}_image.png")
                             plot_data = hdu.data.astype(float)
                             vmin = np.nanpercentile(plot_data, 1)
@@ -1127,6 +1029,7 @@ with tabs[5]:
         spike_std = st.slider("Spike std-factor", 2, 20, 6)
 
     anomalies_all = []
+    expected_keys = ["type", "wl", "index", "value"]  # defined here — used both inside loop and in summary
 
     for res in results:
         if res.get("wl") is None or res.get("fl") is None:
@@ -1167,7 +1070,6 @@ with tabs[5]:
         st.plotly_chart(fig, width='stretch', key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot'))
 
         # Normalize anomalies: ensure all expected keys exist
-        expected_keys = ["type", "wl", "index", "value"]
         normalized_anoms = [{k: a.get(k, np.nan) for k in expected_keys} for a in anoms]
 
         if normalized_anoms:
