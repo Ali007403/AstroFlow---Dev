@@ -972,7 +972,7 @@ with tabs[1]:
     st.header("Spectrum")
     show_smooth = st.checkbox("Show smoothed version", value=True, key="spectrum_smooth")
 
-    for res in results:
+    for res_idx, res in enumerate(results):
         if res.get("wl") is None or res.get("fl") is None:
             continue
 
@@ -989,10 +989,12 @@ with tabs[1]:
 
             # === IMPROVED UNIQUE KEY ===
             unique_key = make_key(
-                res.get('file', ''), 
-                res.get('hdu_index', ''), 
+                "spectrum",
+                res_idx,
+                res.get('file', ''),
+                res.get('hdu_index', ''),
                 res.get('path', ''),      # path makes it more unique
-                hashlib.md5(str(res.get('wl', ''))[:50].encode()).hexdigest()[:6]  # extra safety
+                hashlib.md5(np.asarray(res.get('wl', []), dtype=float).tobytes()).hexdigest()[:10]
             )
 
             fig = plot_spectrum_interactive(
@@ -1019,7 +1021,7 @@ with tabs[1]:
                     df.to_csv(index=False).encode('utf-8'),
                     file_name=f"{res['file']}_hdu{res.get('hdu_index')}.csv",
                     mime='text/csv',
-                    key=make_key(res.get('file'), res.get('hdu_index'), 'dl')
+                    key=make_key("dl", res_idx, res.get('file'), res.get('hdu_index'))
                 )
 
 
@@ -1309,7 +1311,7 @@ with tabs[5]:
     anomalies_all = []
     expected_keys = ANOMALY_KEYS
 
-    for res in results:
+    for res_idx, res in enumerate(results):
         if res.get("wl") is None or res.get("fl") is None:
             continue
 
@@ -1351,7 +1353,7 @@ with tabs[5]:
         st.plotly_chart(
             fig,
             use_container_width=True,
-            key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot')
+            key=make_key("anomaly_plot", res_idx, res['file'], res.get('hdu_index'))
         )
 
         normalized_anoms = [{k: a.get(k, np.nan) for k in expected_keys} for a in anoms]
@@ -1362,7 +1364,7 @@ with tabs[5]:
 
             if enable_downloads:
                 import json
-                dl_key_json = make_key(res['file'], res.get('hdu_index'), 'anoms_json')
+                dl_key_json = make_key("anoms_json", res_idx, res['file'], res.get('hdu_index'))
                 st.download_button(
                     f"Download anomalies JSON - {res['file']}",
                     json.dumps(anoms, indent=2).encode('utf-8'),
@@ -1371,7 +1373,7 @@ with tabs[5]:
                     key=dl_key_json
                 )
 
-                dl_key_csv = make_key(res['file'], res.get('hdu_index'), 'anoms_csv')
+                dl_key_csv = make_key("anoms_csv", res_idx, res['file'], res.get('hdu_index'))
                 st.download_button(
                     f"Download anomalies CSV - {res['file']}",
                     df_anoms.to_csv(index=False).encode('utf-8'),
@@ -1388,7 +1390,7 @@ with tabs[5]:
     if anomalies_all and enable_downloads:
         normalized_all = [{k: a.get(k, np.nan) for k in expected_keys + ["file", "hdu_index"]} for a in anomalies_all]
         df_all = pd.DataFrame(normalized_all)
-        dl_key_all = make_key('all', 'anomalies', 'csv')
+        dl_key_all = make_key('all', 'anomalies', 'csv', len(anomalies_all))
         st.download_button(
             "Download all anomalies (CSV)",
             df_all.to_csv(index=False).encode('utf-8'),
