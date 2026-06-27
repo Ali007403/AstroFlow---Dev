@@ -1,305 +1,315 @@
 """
-tests/test_astroflow.py
+Tests for AstroFlow core logic.
 
-Smoke tests for AstroFlow core functions.
-These run without a live MAST connection and without Streamlit.
-They verify that the key data-processing functions behave correctly
-on synthetic inputs, satisfying the JOSS requirement for a minimal
-automated test suite.
-
-Run with:
-    pytest tests/ -v
+These tests import the real functions from app.py while stubbing the
+Streamlit UI layer and the optional FitsFlow package imports so the module
+can be loaded without launching the app or touching the network.
 """
+
+from __future__ import annotations
+
+import importlib.util
+import sys
+import types
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import numpy as np
 import pytest
-from unittest.mock import MagicMock
+from astropy.io import fits
+from astropy.table import Table
 
 
-# ---------------------------------------------------------------------------
-# Helpers — import only the pure-Python functions, not the Streamlit UI layer
-# ---------------------------------------------------------------------------
-
-def _make_synthetic_hdu(data, extname=None, naxis=None):
-    """Create a minimal mock HDU for testing try_extract_spectrum."""
-    from astropy.io.fits import ImageHDU, BinTableHDU, Column
-    import astropy.io.fits as fits
-
-    hdu = MagicMock()
-    hdu.data = data
-    header = fits.Header()
-    if extname is not None:
-        header['EXTNAME'] = extname
-    if naxis is not None:
-        header['NAXIS'] = naxis
-    hdu.header = header
-    return hdu
+ROOT = Path(__file__).resolve().parents[1]
+APP_PATH = ROOT / "app.py"
 
 
-# ---------------------------------------------------------------------------
-# Import the functions under test directly from the module files
-# We avoid importing app.py (which triggers Streamlit) and import
-# only the FitsFlow submodules and the functions defined in app.py
-# by extracting them into the FitsFlow package where possible.
-# For functions defined in app.py itself, we do a targeted import.
-# ---------------------------------------------------------------------------
+class _NullContext:
+    def __enter__(self):
+        return self
 
-def _import_app_functions():
-    """
-    Import pure-logic functions from app.py without triggering Streamlit.
-    We patch st before importing so the module-level st.set_page_config
-    and st.sidebar calls do not raise.
-    """
-    import sys
-    import types
+    def __exit__(self, exc_type, exc, tb):
+        return False
 
-    # Build a minimal streamlit mock
-    st_mock = MagicMock()
-    st_mock.session_state = {}
-    st_mock.cache_data = lambda **kw: (lambda f: f)   # passthrough decorator
-    sys.modules['streamlit'] = st_mock
 
-    # Also mock astroquery.mast so import doesn't need network
-    mast_mock = MagicMock()
-    sys.modules['astroquery'] = MagicMock()
-    sys.modules['astroquery.mast'] = mast_mock
+class _ProgressStub:
+    def progress(self, *args, **kwargs):
+        return self
 
-    import importlib
-    spec = importlib.util.spec_from_file_location("app", "app.py")
-    app = importlib.util.module_from_spec(spec)
-    # Don't exec the whole module (it runs the Streamlit UI);
-    # instead exec only up to the function definitions by catching SystemExit
+
+class _SidebarStub:
+    def header(self, *args, **kwargs):
+        return None
+
+    def markdown(self, *args, **kwargs):
+        return None
+
+    def caption(self, *args, **kwargs):
+        return None
+
+    def expander(self, *args, **kwargs):
+        return _NullContext()
+
+    def checkbox(self, *args, **kwargs):
+        return kwargs.get("value", False)
+
+    def slider(self, *args, **kwargs):
+        if "value" in kwargs:
+            return kwargs["value"]
+        if len(args) >= 4:
+            return args[3]
+        return None
+
+    def text_input(self, *args, **kwargs):
+        return kwargs.get("value", "")
+
+    def selectbox(self, label, options, index=0, **kwargs):
+        if not options:
+            return None
+        return options[index]
+
+    def button(self, *args, **kwargs):
+        return False
+
+    def metric(self, *args, **kwargs):
+        return None
+
+
+class StreamlitStub(types.ModuleType):
+    def __init__(self):
+        super().__init__("streamlit")
+        self.session_state = {}
+        self.sidebar = _SidebarStub()
+
+    def set_page_config(self, *args, **kwargs):
+        return None
+
+    def cache_data(self, *args, **kwargs):
+        def decorator(func):
+            return func
+        return decorator
+
+    def stop(self):
+        raise SystemExit
+
+    def file_uploader(self, *args, **kwargs):
+        return []
+
+    def progress(self, *args, **kwargs):
+        return _ProgressStub()
+
+    def empty(self):
+        return _NullContext()
+
+    def expander(self, *args, **kwargs):
+        return _NullContext()
+
+    def columns(self, n):
+        return [_NullContext() for _ in range(n)]
+
+    def tabs(self, labels):
+        return [_NullContext() for _ in labels]
+
+    def dataframe(self, *args, **kwargs):
+        return None
+
+    def plotly_chart(self, *args, **kwargs):
+        return None
+
+    def pyplot(self, *args, **kwargs):
+        return None
+
+    def download_button(self, *args, **kwargs):
+        return None
+
+    def rerun(self):
+        return None
+
+    def title(self, *args, **kwargs):
+        return None
+
+    def header(self, *args, **kwargs):
+        return None
+
+    def subheader(self, *args, **kwargs):
+        return None
+
+    def markdown(self, *args, **kwargs):
+        return None
+
+    def info(self, *args, **kwargs):
+        return None
+
+    def warning(self, *args, **kwargs):
+        return None
+
+    def error(self, *args, **kwargs):
+        return None
+
+    def success(self, *args, **kwargs):
+        return None
+
+    def caption(self, *args, **kwargs):
+        return None
+
+    def write(self, *args, **kwargs):
+        return None
+
+
+def _install_stub_modules():
+    """Install minimal modules required so app.py can be imported."""
+    # streamlit
+    sys.modules["streamlit"] = StreamlitStub()
+
+    # FitsFlow package stubs
+    fitsflow = types.ModuleType("FitsFlow")
+    fitsflow.__path__ = []
+    sys.modules["FitsFlow"] = fitsflow
+
+    csv_handler = types.ModuleType("FitsFlow.csv_handler")
+    csv_handler.ingest_csv_file = lambda *args, **kwargs: []
+    sys.modules["FitsFlow.csv_handler"] = csv_handler
+
+    detectors = types.ModuleType("FitsFlow.detectors")
+    detectors.annotate_plotly = lambda fig, *args, **kwargs: fig
+    sys.modules["FitsFlow.detectors"] = detectors
+
+    def map_columns(df):
+        cols = [str(c).upper() for c in getattr(df, "columns", [])]
+        mapping = {}
+        for candidate in ("WAVELENGTH", "WAVE", "LAMBDA", "WLEN", "TIME", "X"):
+            if candidate in cols:
+                mapping["wavelength" if candidate != "TIME" else "time"] = candidate
+                break
+        for candidate in ("FLUX", "FLUX_DENSITY", "SPECTRUM", "INTENSITY", "VALUE", "SAP_FLUX", "Y"):
+            if candidate in cols:
+                mapping["flux" if candidate != "VALUE" else "value"] = candidate
+                break
+        return mapping
+
+    fields = types.ModuleType("FitsFlow.fields")
+    fields.map_columns = map_columns
+    sys.modules["FitsFlow.fields"] = fields
+
+    reporters = types.ModuleType("FitsFlow.reporters")
+    reporters.generate_pdf_report = lambda *args, **kwargs: None
+    sys.modules["FitsFlow.reporters"] = reporters
+
+    # astroquery.mast
+    astroquery = types.ModuleType("astroquery")
+    astroquery.__path__ = []
+    sys.modules["astroquery"] = astroquery
+
+    mast = types.ModuleType("astroquery.mast")
+    mast.Observations = MagicMock()
+    sys.modules["astroquery.mast"] = mast
+
+
+@pytest.fixture(scope="module")
+def app():
+    _install_stub_modules()
+    spec = importlib.util.spec_from_file_location("app", APP_PATH)
+    module = importlib.util.module_from_spec(spec)
     try:
-        spec.loader.exec_module(app)
-    except Exception:
+        assert spec.loader is not None
+        spec.loader.exec_module(module)
+    except SystemExit:
+        # Expected: app.py calls st.stop() once the stubbed UI has no files.
         pass
-
-    return app
-
-
-# ---------------------------------------------------------------------------
-# Test smooth_flux
-# ---------------------------------------------------------------------------
-
-class TestSmoothFlux:
-    def setup_method(self):
-        from scipy.signal import savgol_filter
-        import numpy as np
-
-        # Reproduce smooth_flux logic locally to test independently
-        def smooth_flux(flux, window, polyorder):
-            flux = np.asarray(flux, dtype=float)
-            flux[~np.isfinite(flux)] = np.nan
-            finite = np.isfinite(flux)
-            if finite.sum() < max(window, polyorder + 2):
-                return flux
-            if not np.all(finite):
-                x = np.arange(len(flux))
-                flux = np.interp(x, x[finite], flux[finite])
-            if window >= len(flux):
-                window = len(flux) - 1 if len(flux) % 2 == 0 else len(flux)
-            if window % 2 == 0:
-                window += 1
-            if window < polyorder + 2:
-                return flux
-            try:
-                return savgol_filter(flux, window, polyorder)
-            except Exception:
-                return flux
-
-        self.smooth_flux = smooth_flux
-
-    def test_smooth_clean_signal(self):
-        """Smoothing a clean sine wave should return finite values."""
-        x = np.linspace(0, 4 * np.pi, 200)
-        fl = np.sin(x)
-        result = self.smooth_flux(fl, window=11, polyorder=3)
-        assert np.all(np.isfinite(result))
-        assert len(result) == len(fl)
-
-    def test_smooth_preserves_length(self):
-        fl = np.random.rand(500)
-        result = self.smooth_flux(fl, window=51, polyorder=3)
-        assert len(result) == 500
-
-    def test_smooth_handles_nans(self):
-        fl = np.ones(100, dtype=float)
-        fl[30:40] = np.nan
-        result = self.smooth_flux(fl, window=11, polyorder=3)
-        assert len(result) == 100
-        # Result should be mostly finite after interpolation fills NaN gaps
-        assert np.sum(np.isfinite(result)) > 80
-
-    def test_smooth_too_short_returns_original(self):
-        """If flux is shorter than window, return the original array unchanged."""
-        fl = np.array([1.0, 2.0, 3.0])
-        result = self.smooth_flux(fl, window=51, polyorder=3)
-        np.testing.assert_array_equal(result, fl)
+    return module
 
 
-# ---------------------------------------------------------------------------
-# Test NON_SCIENCE_EXTNAMES filter logic
-# ---------------------------------------------------------------------------
-
-class TestExtNameFilter:
-    """
-    Test that the EXTNAME blocklist correctly identifies non-science HDUs.
-    We test the set membership logic directly without needing app.py imports.
-    """
-
-    NON_SCIENCE = {
-        'DQ', 'DQ1', 'DQ2', 'DQ3',
-        'ERR', 'ERR1', 'ERR2', 'SIGMA', 'NOISE', 'STDEV',
-        'VAR_POISSON', 'VAR_RNOISE', 'VAR_FLAT', 'VAR_RAMP',
-        'WHT', 'WEIGHT', 'EXP', 'EXPTIME', 'CTX',
-        'BKG', 'BACKGROUND',
-        'CONTAM', 'MODEL',
-        'KERNEL', 'PSF',
-        'GROUPDQ', 'PIXELDQ',
-        'WAVELENGTH', 'WCSCORR', 'HDRTAB', 'ASDF',
-        'D2IMARR', 'WCSDVARR', 'SIPWCS',
-    }
-
-    def test_dq_is_blocked(self):
-        assert 'DQ' in self.NON_SCIENCE
-
-    def test_err_is_blocked(self):
-        assert 'ERR' in self.NON_SCIENCE
-
-    def test_var_poisson_is_blocked(self):
-        assert 'VAR_POISSON' in self.NON_SCIENCE
-
-    def test_sci_is_not_blocked(self):
-        assert 'SCI' not in self.NON_SCIENCE
-
-    def test_flux_is_not_blocked(self):
-        assert 'FLUX' not in self.NON_SCIENCE
-
-    def test_case_insensitive_match(self):
-        """The app uppercases extname before checking — verify logic."""
-        raw = 'dq'
-        assert raw.strip().upper() in self.NON_SCIENCE
+def test_make_key_is_deterministic(app):
+    a = app.make_key("file.fits", 1, "/tmp/x")
+    b = app.make_key("file.fits", 1, "/tmp/x")
+    c = app.make_key("file.fits", 2, "/tmp/x")
+    assert a == b
+    assert a != c
 
 
-# ---------------------------------------------------------------------------
-# Test build_stacked_spectrum logic
-# ---------------------------------------------------------------------------
-
-class TestStackedSpectrum:
-    def _build_stacked_spectrum(self, spectra, method="mean"):
-        """Reproduce build_stacked_spectrum for isolated testing."""
-        min_wl = min(np.nanmin(r["wl"]) for r in spectra)
-        max_wl = max(np.nanmax(r["wl"]) for r in spectra)
-        ref_wl = np.linspace(min_wl, max_wl, 2000)
-        interp_fluxes = [
-            np.interp(ref_wl, r["wl"], r["fl"], left=np.nan, right=np.nan)
-            for r in spectra
-        ]
-        arr = np.array(interp_fluxes)
-        if arr.size == 0 or not np.any(np.isfinite(arr)):
-            return ref_wl, np.full_like(ref_wl, np.nan)
-        with np.errstate(invalid='ignore', divide='ignore'):
-            stacked = np.nanmedian(arr, axis=0) if method == "median" else np.nanmean(arr, axis=0)
-        stacked = np.asarray(stacked, dtype=float)
-        stacked[~np.isfinite(stacked)] = np.nan
-        return ref_wl, stacked
-
-    def test_mean_stack_two_identical(self):
-        wl = np.linspace(1.0, 2.5, 300)
-        fl = np.ones(300)
-        spectra = [{"wl": wl, "fl": fl}, {"wl": wl, "fl": fl}]
-        ref_wl, stacked = self._build_stacked_spectrum(spectra, method="mean")
-        assert len(ref_wl) == 2000
-        assert np.nanmean(stacked) == pytest.approx(1.0, rel=1e-3)
-
-    def test_median_stack(self):
-        wl = np.linspace(0.5, 14.0, 500)
-        spectra = [
-            {"wl": wl, "fl": np.ones(500) * i}
-            for i in range(1, 6)
-        ]
-        _, stacked = self._build_stacked_spectrum(spectra, method="median")
-        # Median of [1,2,3,4,5] = 3.0
-        assert np.nanmedian(stacked) == pytest.approx(3.0, rel=0.01)
-
-    def test_empty_guard(self):
-        """All-NaN input should return NaN stacked array without crashing."""
-        wl = np.linspace(1.0, 5.0, 100)
-        fl = np.full(100, np.nan)
-        spectra = [{"wl": wl, "fl": fl}]
-        ref_wl, stacked = self._build_stacked_spectrum(spectra)
-        assert len(stacked) == 2000
-        # All NaN in = all NaN out is acceptable
-        assert not np.all(np.isfinite(stacked)) or True  # guard does not crash
+def test_fits_skip_reason_blocks_non_science_extensions(app):
+    hdu = fits.ImageHDU(np.ones((2, 2)))
+    hdu.header["EXTNAME"] = "DQ"
+    assert "non-science extension" in app.fits_skip_reason(hdu)
 
 
-# ---------------------------------------------------------------------------
-# Test anomaly detector core logic (standalone, no app.py import needed)
-# ---------------------------------------------------------------------------
-
-class TestAnomalyDetector:
-    def _detect_simple(self, wl, fl, z_thresh=4.0):
-        """Minimal spike detector using MAD, mirroring the app's approach."""
-        from astropy.stats import mad_std, sigma_clip
-        clipped = sigma_clip(fl, sigma=z_thresh, maxiters=5)
-        residual = fl - np.nanmedian(fl)
-        noise = mad_std(fl, ignore_nan=True)
-        if noise == 0:
-            return []
-        outlier_idx = np.where(np.abs(residual) >= z_thresh * noise)[0]
-        return [{"index": int(i), "wl": float(wl[i]), "value": float(fl[i])}
-                for i in outlier_idx]
-
-    def test_detects_spike(self):
-        np.random.seed(42)
-        wl = np.linspace(1.0, 2.5, 300)
-        # Realistic spectrum: smooth continuum + small noise
-        fl = np.ones(300) + np.random.normal(0, 0.05, 300)
-        fl[150] = fl[150] + 5.0   # spike: 5-sigma above noise level
-        anoms = self._detect_simple(wl, fl, z_thresh=4.0)
-        indices = [a["index"] for a in anoms]
-        assert 150 in indices
-
-    def test_clean_spectrum_no_anomalies(self):
-        wl = np.linspace(1.0, 2.5, 300)
-        fl = np.ones(300)   # perfectly flat — nothing to flag
-        anoms = self._detect_simple(wl, fl, z_thresh=4.0)
-        assert len(anoms) == 0
-
-    def test_returns_list(self):
-        wl = np.linspace(0.5, 5.0, 100)
-        fl = np.random.normal(1.0, 0.01, 100)
-        result = self._detect_simple(wl, fl)
-        assert isinstance(result, list)
+def test_fits_skip_reason_blocks_high_dimensional_data(app):
+    hdu = fits.ImageHDU(np.ones((2, 2, 2)))
+    assert "unsupported dimensionality" in app.fits_skip_reason(hdu)
 
 
-# ---------------------------------------------------------------------------
-# Test make_key uniqueness
-# ---------------------------------------------------------------------------
+def test_try_extract_spectrum_accepts_1d_arrays(app):
+    hdu = fits.PrimaryHDU(np.array([1.0, 2.0, 3.0]))
+    wl, fl, labels = app.try_extract_spectrum(hdu)
+    assert np.array_equal(wl, np.array([0, 1, 2]))
+    assert np.allclose(fl, np.array([1.0, 2.0, 3.0]))
+    assert labels["x_label"] == "Index"
+    assert labels["y_label"] == "Value"
 
-class TestMakeKey:
-    def make_key(self, *parts):
-        import hashlib, re
-        raw = "_".join(str(p) for p in parts if p is not None)
-        short_hash = hashlib.md5(raw.encode()).hexdigest()[:8]
-        key = re.sub(r'\W+', '_', raw).strip('_')
-        return f"{key}_{short_hash}"
 
-    def test_different_inputs_different_keys(self):
-        k1 = self.make_key("file_a.fits", 1, "spectrum")
-        k2 = self.make_key("file_b.fits", 1, "spectrum")
-        assert k1 != k2
+def test_try_extract_spectrum_blocks_non_science_hdus(app):
+    hdu = fits.ImageHDU(np.array([1.0, 2.0, 3.0]))
+    hdu.header["EXTNAME"] = "ERR"
+    wl, fl, labels = app.try_extract_spectrum(hdu)
+    assert wl is None and fl is None
+    assert labels["x_label"] == "Wavelength"
+    assert labels["y_label"] == "Flux"
 
-    def test_same_inputs_same_key(self):
-        k1 = self.make_key("file_a.fits", 1)
-        k2 = self.make_key("file_a.fits", 1)
-        assert k1 == k2
 
-    def test_none_parts_ignored(self):
-        k1 = self.make_key("file_a.fits", None, 1)
-        k2 = self.make_key("file_a.fits", 1)
-        assert k1 == k2
+def test_try_extract_spectrum_reads_table_columns(app):
+    table = Table({"WAVELENGTH": [1.0, 2.0, 3.0], "FLUX": [10.0, 11.0, 12.0]})
+    hdu = fits.BinTableHDU(table)
+    wl, fl, labels = app.try_extract_spectrum(hdu)
+    assert np.allclose(wl, np.array([1.0, 2.0, 3.0]))
+    assert np.allclose(fl, np.array([10.0, 11.0, 12.0]))
+    assert labels["x_label"].upper() == "WAVELENGTH"
+    assert labels["y_label"].upper() == "FLUX"
 
-    def test_key_is_string(self):
-        k = self.make_key("test", 42)
-        assert isinstance(k, str)
+
+def test_build_stacked_spectrum_mean_and_median(app):
+    wl = np.linspace(1.0, 2.0, 100)
+    spectra = [
+        {"wl": wl, "fl": np.ones_like(wl)},
+        {"wl": wl, "fl": np.ones_like(wl) * 3},
+    ]
+    ref_wl, mean_stack = app.build_stacked_spectrum(spectra, method="mean")
+    _, median_stack = app.build_stacked_spectrum(spectra, method="median")
+    assert len(ref_wl) == 2000
+    assert np.nanmean(mean_stack) == pytest.approx(2.0, rel=1e-3)
+    assert np.nanmean(median_stack) == pytest.approx(2.0, rel=1e-3)
+
+
+def test_smooth_flux_handles_nans(app):
+    fl = np.ones(100, dtype=float)
+    fl[20:30] = np.nan
+    smoothed = app.smooth_flux(fl, window=11, polyorder=3)
+    assert len(smoothed) == len(fl)
+    assert np.isfinite(smoothed).sum() > 80
+
+
+def test_detect_anomalies_finds_spike(app):
+    rng = np.random.default_rng(42)
+    wl = np.linspace(1.0, 2.0, 400)
+    fl = np.ones_like(wl) + rng.normal(0, 0.02, len(wl))
+    fl[200] += 1.0
+    anomalies = app.detect_anomalies(wl, fl, params={"mad_sigma": 4.0, "prominence_sigma": 4.0})
+    assert isinstance(anomalies, list)
+    assert any(abs(a["index"] - 200) <= 2 for a in anomalies)
+
+
+def test_calc_snr_on_band_returns_positive_value(app):
+    ref_wl = np.linspace(1.0, 3.0, 500)
+    ref_flux = np.ones_like(ref_wl)
+    ref_flux[(ref_wl > 1.4) & (ref_wl < 1.6)] += 0.2
+    snr = app.calc_snr_on_band(ref_wl, ref_flux, (1.4, 1.6))
+    assert snr >= 0
+
+
+def test_open_fits_best_effort_opens_real_fits(tmp_path, app):
+    path = tmp_path / "simple.fits"
+    fits.PrimaryHDU(np.arange(16).reshape(4, 4)).writeto(path)
+
+    with app.open_fits_best_effort(str(path)) as (hdul, used_memmap):
+        assert len(hdul) == 1
+        assert hdul[0].data.shape == (4, 4)
+        assert isinstance(used_memmap, bool)
