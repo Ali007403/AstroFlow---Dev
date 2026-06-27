@@ -1,28 +1,14 @@
 cff-version: 1.2.0
-message: >-
-  If you use this software, please cite it using the metadata below.
-  After publication, update this file with the JOSS paper citation and
-  your release tag if needed.
-title: "AstroFlow: An interactive pipeline for astronomical FITS and CSV spectral analysis"
+message: "If you use this software, please cite it as below."
 authors:
-  - family-names: Nawaz
-    given-names: Ali
-    affiliation: "Independent Researcher, AstroFlow Project"
-keywords:
-  - astronomy
-  - spectroscopy
-  - FITS
-  - Streamlit
-  - MAST
-  - Python
-license: MIT
-repository-code: "https://github.com/OWNER/REPO"
-url: "https://github.com/OWNER/REPO"
-preferred-citation:
-  type: article
-  title: "AstroFlow: An interactive pipeline for astronomical FITS and CSV spectral analysis"
-  authors:
-    - family-names: Nawaz
-      given-names: Ali
-  year: 2025
-  notes: "Replace with the final JOSS citation once published."
+- family-names: "Ali_Nawaz"
+  given-names: "Ali_Nawaz"
+  orcid: "https://orcid.org/0000-0000-0000-0000"
+- family-names: "Ali"
+  given-names: "Ali"
+  orcid: "https://orcid.org/0000-0000-0000-0000"
+title: "AstroFlow"
+version: 1.0.0
+doi: 10.5281/zenodo.1234
+date-released: 2026-06-27
+url: "https://github.com/Ali007403/AstroFlow---Dev"
