@@ -63,29 +63,6 @@ def make_key(*parts):
     return f"{key}_{short_hash}"
 
 # ---------------------------
-# Render counter
-# Guarantees widget key uniqueness across all tabs even when
-# multiple results share the same file name + HDU index
-# (e.g. same FITS loaded via upload AND MAST in one session).
-# Reset to 0 at the top of every Streamlit script run.
-# ---------------------------
-if "_render_n" not in st.session_state:
-    st.session_state["_render_n"] = 0
-
-# Reset counter on every script run so widgets get fresh keys each rerender
-st.session_state["_render_n"] = 0
-
-def next_key(*parts):
-    """
-    Returns a widget key that is guaranteed unique within this Streamlit run.
-    Combines make_key content with a monotonically increasing counter so
-    identical file+HDU combinations never collide.
-    """
-    st.session_state["_render_n"] += 1
-    base = make_key(*parts)
-    return f"{base}_{st.session_state['_render_n']}"
-
-# ---------------------------
 # Helper / Processing Utils
 # ---------------------------
 WL_COLS = ['WAVELENGTH', 'WAVE', 'LAMBDA', 'WLEN', 'LAMBDA_MICRON', 'LAMBDA_UM', 'WAVELENGTH_MICRON']
@@ -1010,11 +987,12 @@ with tabs[1]:
             if show_smooth:
                 fl_smooth = smooth_flux(fl.copy(), smoothing_window, polyorder)
 
-            # Guaranteed-unique key: content hash + monotonic counter
-            chart_key = next_key(
-                res.get('file', ''),
-                res.get('hdu_index', ''),
-                'spectrum'
+            # === IMPROVED UNIQUE KEY ===
+            unique_key = make_key(
+                res.get('file', ''), 
+                res.get('hdu_index', ''), 
+                res.get('path', ''),      # path makes it more unique
+                hashlib.md5(str(res.get('wl', ''))[:50].encode()).hexdigest()[:6]  # extra safety
             )
 
             fig = plot_spectrum_interactive(
@@ -1028,7 +1006,7 @@ with tabs[1]:
                 x_label=x_label,
                 y_label=y_label
             )
-            st.plotly_chart(fig, use_container_width=True, key=chart_key)
+            st.plotly_chart(fig, use_container_width=True, key=unique_key)
 
             # Downloads
             if enable_downloads:
@@ -1041,7 +1019,7 @@ with tabs[1]:
                     df.to_csv(index=False).encode('utf-8'),
                     file_name=f"{res['file']}_hdu{res.get('hdu_index')}.csv",
                     mime='text/csv',
-                    key=next_key(res.get('file'), res.get('hdu_index'), 'dl')
+                    key=make_key(res.get('file'), res.get('hdu_index'), 'dl')
                 )
 
 
@@ -1060,7 +1038,7 @@ with tabs[2]:
             continue
         st.dataframe(df.head(500), use_container_width=True)
         if enable_downloads:
-            dl_key = next_key(r.get('file'), r.get('hdu_index'), 'download', 'table_csv')
+            dl_key = make_key(r.get('file'), r.get('hdu_index'), 'download', 'table_csv')
             st.download_button(f"Download CSV: {label}", df.to_csv(index=False).encode('utf-8'), file_name=f"{label}.csv", mime='text/csv', key=dl_key)
 
 
@@ -1144,7 +1122,7 @@ with tabs[3]:
                             buf = io.BytesIO()
                             fig.savefig(buf, format="png", dpi=200, bbox_inches="tight")
                             buf.seek(0)
-                            dl_key = next_key(r['file'], idx, 'image_download')
+                            dl_key = make_key(r['file'], idx, 'image_download')
                             st.download_button(
                                 label=f"⬇ Download Image (PNG, 200 dpi) — {r['file']} HDU {idx}",
                                 data=buf,
@@ -1373,7 +1351,7 @@ with tabs[5]:
         st.plotly_chart(
             fig,
             use_container_width=True,
-            key=next_key(res['file'], res.get('hdu_index'), 'anomaly_plot')
+            key=make_key(res['file'], res.get('hdu_index'), 'anomaly_plot')
         )
 
         normalized_anoms = [{k: a.get(k, np.nan) for k in expected_keys} for a in anoms]
@@ -1384,7 +1362,7 @@ with tabs[5]:
 
             if enable_downloads:
                 import json
-                dl_key_json = next_key(res['file'], res.get('hdu_index'), 'anoms_json')
+                dl_key_json = make_key(res['file'], res.get('hdu_index'), 'anoms_json')
                 st.download_button(
                     f"Download anomalies JSON - {res['file']}",
                     json.dumps(anoms, indent=2).encode('utf-8'),
@@ -1393,7 +1371,7 @@ with tabs[5]:
                     key=dl_key_json
                 )
 
-                dl_key_csv = next_key(res['file'], res.get('hdu_index'), 'anoms_csv')
+                dl_key_csv = make_key(res['file'], res.get('hdu_index'), 'anoms_csv')
                 st.download_button(
                     f"Download anomalies CSV - {res['file']}",
                     df_anoms.to_csv(index=False).encode('utf-8'),
@@ -1410,7 +1388,7 @@ with tabs[5]:
     if anomalies_all and enable_downloads:
         normalized_all = [{k: a.get(k, np.nan) for k in expected_keys + ["file", "hdu_index"]} for a in anomalies_all]
         df_all = pd.DataFrame(normalized_all)
-        dl_key_all = next_key('all', 'anomalies', 'csv')
+        dl_key_all = make_key('all', 'anomalies', 'csv')
         st.download_button(
             "Download all anomalies (CSV)",
             df_all.to_csv(index=False).encode('utf-8'),
